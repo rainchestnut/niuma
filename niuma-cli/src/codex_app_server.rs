@@ -1,0 +1,405 @@
+//! Codex app-server JSON-RPC client over stdio.
+//!
+//! The gateway owns one app-server process for its whole lifetime. Mobile
+//! refresh requests reuse this client instead of spawning short-lived Codex
+//! commands, which keeps the desktop source of truth inside Codex itself.
+
+use std::collections::HashMap;
+use std::process::Stdio;
+use std::sync::Arc;
+use std::sync::Mutex as StdMutex;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+use anyhow::{Context, Result, anyhow};
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::process::{Child, ChildStdin, ChildStdout, Command};
+use tokio::sync::{Mutex, broadcast, oneshot};
+use tokio::time::{Duration, timeout};
+use tracing::{debug, warn};
+
+use crate::paths;
+
+type PendingResponse = std::result::Result<Value, String>;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelState {
+    pub current_model: Option<String>,
+    pub available_models: Vec<String>,
+}
+
+#[derive(Clone)]
+pub struct CodexAppServerClient {
+    inner: Arc<CodexAppServerInner>,
+}
+
+struct CodexAppServerInner {
+    child: StdMutex<Child>,
+    stdin: Mutex<ChildStdin>,
+    pending: Arc<Mutex<HashMap<String, oneshot::Sender<PendingResponse>>>>,
+    notifications: broadcast::Sender<Value>,
+    next_id: AtomicU64,
+}
+
+impl CodexAppServerClient {
+    /// Start Codex app-server and complete the JSON-RPC initialize handshake.
+    pub async fn start(command: &[String]) -> Result<Self> {
+        let (binary, args) = command
+            .split_first()
+            .context("codex app-server command is empty")?;
+        let mut child = Command::new(binary)
+            .args(args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .with_context(|| format!("failed to spawn {}", command.join(" ")))?;
+        let stdin = child.stdin.take().context("app-server stdin unavailable")?;
+        let stdout = child
+            .stdout
+            .take()
+            .context("app-server stdout unavailable")?;
+        let stderr = child
+            .stderr
+            .take()
+            .context("app-server stderr unavailable")?;
+        spawn_stderr_logger(stderr);
+
+        let (notifications, _) = broadcast::channel(256);
+        let client = Self {
+            inner: Arc::new(CodexAppServerInner {
+                child: StdMutex::new(child),
+                stdin: Mutex::new(stdin),
+                pending: Arc::new(Mutex::new(HashMap::new())),
+                notifications,
+                next_id: AtomicU64::new(1),
+            }),
+        };
+        spawn_stdout_reader(
+            stdout,
+            client.inner.pending.clone(),
+            client.inner.notifications.clone(),
+        );
+        client.initialize().await?;
+        let log_path = paths::runtime_dir()?.join("codex_app_server.initialized");
+        std::fs::write(log_path, command.join(" "))?;
+        Ok(client)
+    }
+
+    /// Subscribe to app-server notifications and requests emitted on stdout.
+    pub fn subscribe_notifications(&self) -> broadcast::Receiver<Value> {
+        self.inner.notifications.subscribe()
+    }
+
+    /// Send a JSON-RPC request and wait for its response.
+    pub async fn request(&self, method: &str, params: Value) -> Result<Value> {
+        let request_id = format!("req-{}", self.inner.next_id.fetch_add(1, Ordering::SeqCst));
+        let (sender, receiver) = oneshot::channel();
+        self.inner
+            .pending
+            .lock()
+            .await
+            .insert(request_id.clone(), sender);
+        let payload = json!({
+            "id": request_id,
+            "method": method,
+            "params": params,
+        });
+        if let Err(err) = self.write_json_line(&payload).await {
+            self.inner.pending.lock().await.remove(&request_id);
+            return Err(err);
+        }
+        let response = timeout(Duration::from_secs(60), receiver)
+            .await
+            .with_context(|| format!("app-server request timed out: {method}"))?
+            .with_context(|| format!("app-server response channel closed: {method}"))?;
+        response.map_err(|message| anyhow!(message))
+    }
+
+    /// Send a JSON-RPC notification without waiting for a response.
+    pub async fn notify(&self, method: &str, params: Option<Value>) -> Result<()> {
+        let mut payload = json!({ "method": method });
+        if let Some(params) = params {
+            payload["params"] = params;
+        }
+        self.write_json_line(&payload).await
+    }
+
+    /// Resolve an app-server request with a successful result.
+    pub async fn respond(&self, request_id: Value, result: Value) -> Result<()> {
+        self.write_json_line(&json!({
+            "id": request_id,
+            "result": result,
+        }))
+        .await
+    }
+
+    /// Resolve an app-server request with a JSON-RPC error.
+    pub async fn respond_error(&self, request_id: Value, code: i64, message: &str) -> Result<()> {
+        self.write_json_line(&json!({
+            "id": request_id,
+            "error": {
+                "code": code,
+                "message": message,
+            },
+        }))
+        .await
+    }
+
+    /// Return raw thread payloads from Codex's `thread/list` endpoint.
+    pub async fn list_thread_payloads(&self, cwd: &str, archived: bool) -> Result<Vec<Value>> {
+        let result = self
+            .request(
+                "thread/list",
+                json!({
+                    "cwd": cwd,
+                    "archived": archived,
+                }),
+            )
+            .await?;
+        Ok(result
+            .get("data")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default())
+    }
+
+    /// Return one raw thread payload from Codex's `thread/read` endpoint.
+    pub async fn read_thread_payload(&self, thread_id: &str, include_turns: bool) -> Result<Value> {
+        let result = self
+            .request(
+                "thread/read",
+                json!({
+                    "threadId": thread_id,
+                    "includeTurns": include_turns,
+                }),
+            )
+            .await?;
+        result
+            .get("thread")
+            .cloned()
+            .context("thread/read response missing thread")
+    }
+
+    /// Start a new Codex thread in a concrete working directory.
+    pub async fn start_thread_payload(&self, cwd: &str) -> Result<Value> {
+        let result = self
+            .request(
+                "thread/start",
+                json!({
+                    "cwd": cwd,
+                    "serviceName": "niuma-cli",
+                }),
+            )
+            .await?;
+        result
+            .get("thread")
+            .cloned()
+            .context("thread/start response missing thread")
+    }
+
+    /// Resume an existing Codex thread before starting a new turn or replay.
+    pub async fn resume_thread_payload(&self, thread_id: &str, cwd: Option<&str>) -> Result<Value> {
+        let mut params = json!({ "threadId": thread_id });
+        if let Some(cwd) = cwd {
+            params["cwd"] = json!(cwd);
+        }
+        let result = self.request("thread/resume", params).await?;
+        result
+            .get("thread")
+            .cloned()
+            .context("thread/resume response missing thread")
+    }
+
+    /// Start a user turn with Codex-native input items.
+    pub async fn start_turn_payload(
+        &self,
+        thread_id: &str,
+        input_items: Vec<Value>,
+        model: Option<&str>,
+    ) -> Result<Value> {
+        let mut params = json!({
+            "threadId": thread_id,
+            "input": input_items,
+        });
+        if let Some(model) = model {
+            params["model"] = json!(model);
+        }
+        let result = self.request("turn/start", params).await?;
+        result
+            .get("turn")
+            .cloned()
+            .context("turn/start response missing turn")
+    }
+
+    /// Ask Codex for model metadata when the app-server exposes it.
+    pub async fn model_state(&self) -> ModelState {
+        for method in ["model/list", "models/list"] {
+            let Ok(result) = self.request(method, json!({})).await else {
+                continue;
+            };
+            let available_models = extract_model_ids(&result);
+            if !available_models.is_empty() {
+                let current_model = string_field(&result, "model")
+                    .or_else(|| string_field(&result, "currentModel"));
+                return ModelState {
+                    current_model,
+                    available_models,
+                };
+            }
+        }
+        ModelState {
+            current_model: None,
+            available_models: Vec::new(),
+        }
+    }
+
+    async fn initialize(&self) -> Result<()> {
+        self.request(
+            "initialize",
+            json!({
+                "clientInfo": {
+                    "name": "niuma-cli",
+                    "title": "Niuma Desktop Gateway",
+                    "version": env!("CARGO_PKG_VERSION"),
+                },
+                "capabilities": {
+                    "suppressedNotifications": [],
+                },
+            }),
+        )
+        .await?;
+        self.notify("initialized", None).await
+    }
+
+    async fn write_json_line(&self, value: &Value) -> Result<()> {
+        let mut stdin = self.inner.stdin.lock().await;
+        stdin
+            .write_all(serde_json::to_string(value)?.as_bytes())
+            .await?;
+        stdin.write_all(b"\n").await?;
+        stdin.flush().await?;
+        Ok(())
+    }
+}
+
+impl Drop for CodexAppServerInner {
+    fn drop(&mut self) {
+        if let Ok(mut child) = self.child.lock() {
+            let _ = child.start_kill();
+        }
+    }
+}
+
+fn spawn_stderr_logger(stderr: tokio::process::ChildStderr) {
+    tokio::spawn(async move {
+        let mut lines = BufReader::new(stderr).lines();
+        while let Ok(Some(line)) = lines.next_line().await {
+            debug!("codex app-server stderr: {line}");
+        }
+    });
+}
+
+fn spawn_stdout_reader(
+    stdout: ChildStdout,
+    pending: Arc<Mutex<HashMap<String, oneshot::Sender<PendingResponse>>>>,
+    notifications: broadcast::Sender<Value>,
+) {
+    tokio::spawn(async move {
+        let mut lines = BufReader::new(stdout).lines();
+        while let Ok(Some(line)) = lines.next_line().await {
+            let payload: Value = match serde_json::from_str(&line) {
+                Ok(payload) => payload,
+                Err(err) => {
+                    warn!("invalid app-server JSON line: {err}: {line}");
+                    continue;
+                }
+            };
+            if let Some(response_id) = response_id(&payload) {
+                if let Some(sender) = pending.lock().await.remove(&response_id) {
+                    let _ = sender.send(response_payload(payload));
+                    continue;
+                }
+            }
+            debug!("codex app-server event: {payload}");
+            let _ = notifications.send(payload);
+        }
+
+        let mut pending = pending.lock().await;
+        for (_, sender) in pending.drain() {
+            let _ = sender.send(Err("app-server stdout closed".to_string()));
+        }
+    });
+}
+
+fn response_id(payload: &Value) -> Option<String> {
+    if payload.get("method").is_some() {
+        return None;
+    }
+    let id = payload.get("id")?;
+    id.as_str()
+        .map(str::to_string)
+        .or_else(|| id.as_u64().map(|value| value.to_string()))
+}
+
+fn response_payload(payload: Value) -> PendingResponse {
+    if let Some(error) = payload.get("error") {
+        return Err(error.to_string());
+    }
+    Ok(payload.get("result").cloned().unwrap_or(Value::Null))
+}
+
+fn extract_model_ids(payload: &Value) -> Vec<String> {
+    let raw_models = payload
+        .get("models")
+        .or_else(|| payload.get("data"))
+        .or_else(|| payload.get("availableModels"));
+    let Some(raw_models) = raw_models else {
+        return Vec::new();
+    };
+    let mut models = Vec::new();
+    collect_model_ids(raw_models, &mut models);
+    models
+}
+
+fn collect_model_ids(value: &Value, models: &mut Vec<String>) {
+    match value {
+        Value::String(model) => push_model_id(models, model),
+        Value::Array(items) => {
+            for item in items {
+                collect_model_ids(item, models);
+            }
+        }
+        Value::Object(map) => {
+            if let Some(model) = map
+                .get("id")
+                .or_else(|| map.get("model"))
+                .or_else(|| map.get("name"))
+                .and_then(Value::as_str)
+            {
+                push_model_id(models, model);
+            } else {
+                for value in map.values() {
+                    collect_model_ids(value, models);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn push_model_id(models: &mut Vec<String>, model: &str) {
+    if !model.is_empty() && !models.iter().any(|existing| existing == model) {
+        models.push(model.to_string());
+    }
+}
+
+fn string_field(payload: &Value, key: &str) -> Option<String> {
+    payload
+        .get(key)
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}

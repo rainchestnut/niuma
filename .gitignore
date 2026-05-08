@@ -1,0 +1,62 @@
+# Local environment and secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p8
+*.mobileprovision
+*.cer
+*.p12
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.Python
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+build/
+dist/
+*.egg-info/
+
+# Rust
+target/
+
+# Niuma runtime state
+.niuma-state/
+niuma-plugin/.niuma-state/
+state/
+niuma-server/.tmp/
+*.db
+*.sqlite
+*.sqlite3
+*.log
+
+# Xcode and Swift local state
+DerivedData/
+.build/
+*.xcuserstate
+*.xccheckout
+*.moved-aside
+xcuserdata/
+*.xcscmblueprint
+
+# macOS and editor state
+.DS_Store
+*.swp
+*.swo
+.idea/
+.vscode/
+
+# Archives and local transfer artifacts
+*.zip
+*.tar
+*.tar.gz
+*.tgz
+*.dmg
+*.ipa

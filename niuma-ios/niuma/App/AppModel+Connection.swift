@@ -1,0 +1,301 @@
+import Foundation
+import OSLog
+
+extension AppModel {
+    func authenticate(identity: LocalDeviceIdentity, agent: PairedAgent) async throws -> String {
+        let controller = try requireController()
+        // The current FastAPI server keeps session tokens in memory only, so any
+        // server restart invalidates previously persisted mobile tokens. Always
+        // re-run challenge/verify here to keep the control-plane reads and the
+        // WebSocket handshake aligned with the live server process.
+        let challenge = try await controller.issueChallenge(deviceID: identity.deviceID)
+        let verifyPayload = try identityService.makeVerifyRequest(
+            deviceID: identity.deviceID,
+            challengeID: challenge.challengeID,
+            challenge: challenge.challenge
+        )
+        let response = try await controller.verify(request: verifyPayload)
+        controller.updateSessionToken(response.sessionToken)
+        updateAgentToken(agentID: agent.agentID, sessionToken: response.sessionToken)
+        return response.sessionToken
+    }
+
+    func ensurePairingIdentity() throws -> LocalDeviceIdentity {
+        if let identity {
+            return identity
+        }
+        let resolved = try identityService.ensureIdentity(deviceName: DeviceIdentityService.defaultDeviceName)
+        self.identity = resolved
+        return resolved
+    }
+
+    /// Returns the active server controller after the user has configured a Niuma Server address.
+    func requireController() throws -> any NiumaControlling {
+        guard let controller else {
+            throw AppModelError.serverNotConfigured
+        }
+        return controller
+    }
+
+    /// Opens the authenticated WebSocket and continuously consumes server events for the selected agent.
+    func connectRealtime(deviceID: String, agentID: String, sessionToken: String) async {
+        realtimeTask?.cancel()
+        realtimeTask = nil
+        do {
+            let controller = try requireController()
+            guard let agent = pairedAgents.first(where: { $0.agentID == agentID }) else {
+                throw AppModelError.invalidPairPayload
+            }
+            let stream = try await controller.connectRealtime(
+                deviceID: deviceID,
+                agent: agent,
+                sessionToken: sessionToken
+            )
+            connectionState = .connected
+            realtimeTask = Task {
+                do {
+                    for try await event in stream {
+                        await handle(event)
+                    }
+                    if !Task.isCancelled {
+                        await failActiveRefreshes(error: "实时连接已关闭，刷新未完成")
+                        connectionState = .degraded
+                        updateAgentOnline(agentID: agentID, isOnline: false)
+                    }
+                } catch {
+                    if !Task.isCancelled {
+                        await failActiveRefreshes(error: "实时连接中断，刷新未完成")
+                        connectionState = .degraded
+                        updateAgentOnline(agentID: agentID, isOnline: false)
+                        if !isTransientRealtimeDisconnect(error) {
+                            pendingError = error.localizedDescription
+                        }
+                    }
+                }
+            }
+        } catch {
+            connectionState = .degraded
+            pendingError = error.localizedDescription
+        }
+    }
+
+    /// Bounds websocket sends that can otherwise hang after the server has reset
+    /// a socket but URLSession has not surfaced the failure to the awaiting task.
+    func withTimeout<T>(
+        _ timeout: Duration,
+        operation: @escaping () async throws -> T
+    ) async throws -> T {
+        try await withThrowingTaskGroup(of: T.self) { group in
+            defer { group.cancelAll() }
+            group.addTask {
+                try await operation()
+            }
+            group.addTask { [self] in
+                try await Task.sleep(for: timeout)
+                await markRealtimeOperationTimedOut()
+                throw AppModelError.realtimeOperationStalled
+            }
+
+            guard let result = try await group.next() else {
+                throw AppModelError.realtimeOperationStalled
+            }
+            return result
+        }
+    }
+
+    func markRealtimeOperationTimedOut() {
+        controller?.disconnectRealtime()
+        connectionState = .degraded
+    }
+
+    func ensureRealtimeConnected(
+        deviceID: String,
+        agentID: String,
+        sessionToken: String,
+        forceReconnect: Bool = false
+    ) async {
+        if !forceReconnect, connectionState == .connected, realtimeTask != nil {
+            return
+        }
+        await connectRealtime(deviceID: deviceID, agentID: agentID, sessionToken: sessionToken)
+    }
+
+    /// Background suspension and simulator app switching should degrade the
+    /// badge state without presenting a blocking error dialog to the user.
+    func isTransientRealtimeDisconnect(_ error: Error) -> Bool {
+        let nsError = error as NSError
+        if nsError.domain == NSURLErrorDomain {
+            switch URLError.Code(rawValue: nsError.code) {
+            case .networkConnectionLost, .notConnectedToInternet, .cancelled:
+                return true
+            default:
+                break
+            }
+        }
+        let message = error.localizedDescription.lowercased()
+        return message.contains("socket is not connected")
+            || message.contains("connection lost")
+            || message.contains("cancelled")
+            || message.contains("closed")
+    }
+
+    /// Downloads an encrypted server relay transfer once and stores it for local rendering.
+    func receiveTransferIfNeeded(_ ready: TransferReady) async {
+        guard ready.direction == .agentToIOS, let identity else { return }
+        if let payload = localAttachments[ready.transferID],
+           dataStore.localAttachmentData(payload) != nil {
+            _ = try? await controller?.ackTransfer(
+                transferID: ready.transferID,
+                request: TransferAckRequestData(receiverDeviceID: identity.deviceID)
+            )
+            return
+        }
+
+        do {
+            let controller = try requireController()
+            let encryptedData = try await controller.downloadTransfer(
+                transferID: ready.transferID,
+                deviceID: identity.deviceID
+            )
+            guard sha256Hex(encryptedData) == ready.transferID else {
+                throw AppModelError.transferChecksumMismatch
+            }
+            guard let sourceAgent = pairedAgents.first(where: { $0.agentID == ready.sourceDeviceID }) else {
+                throw AppModelError.invalidPairPayload
+            }
+            let cryptoContext = try identityService.makePayloadCryptoContext(
+                peerPublicKey: sourceAgent.agentEncryptionPublicKey,
+                bindingID: sourceAgent.bindingID
+            )
+            let envelope = String(data: encryptedData, encoding: .utf8) ?? ""
+            let data = try PayloadCryptoService.decrypt(
+                envelope: envelope,
+                context: cryptoContext,
+                direction: .agentToIOS,
+                additionalData: Self.transferAdditionalData(
+                    direction: .agentToIOS,
+                    sourceDeviceID: ready.sourceDeviceID,
+                    targetDeviceID: ready.targetDeviceID
+                )
+            )
+            let localRelativePath = try dataStore.saveLocalAttachmentFile(
+                transferID: ready.transferID,
+                fileName: nil,
+                data: data
+            )
+            let payload = LocalAttachmentPayload(
+                transferID: ready.transferID,
+                direction: ready.direction,
+                sourceDeviceID: ready.sourceDeviceID,
+                targetDeviceID: ready.targetDeviceID,
+                storedAt: .now,
+                fileName: nil,
+                mimeType: nil,
+                sizeBytes: ready.encryptedSizeBytes,
+                localRelativePath: localRelativePath
+            )
+            localAttachments[ready.transferID] = payload
+            dataStore.upsertLocalAttachment(payload)
+            _ = try await controller.ackTransfer(
+                transferID: ready.transferID,
+                request: TransferAckRequestData(receiverDeviceID: identity.deviceID)
+            )
+        } catch {
+            pendingError = error.localizedDescription
+        }
+    }
+
+    /// Routes one realtime event to local persistence or observed UI state.
+    func handle(_ event: RealtimeEvent) async {
+        switch event {
+        case .taskUpdate(let update):
+            logger.info("realtime_task_update thread_id=\(update.threadID, privacy: .public) seq=\(update.seq, privacy: .public) role=\(update.entry.role.rawValue, privacy: .public) type=\(update.entry.type, privacy: .public) phase=\((update.entry.phase ?? "nil"), privacy: .public) entry_id=\(update.entry.id, privacy: .public)")
+            threadSyncPipeline.submit(.taskUpdate(update))
+
+        case .transferReady(let ready):
+            await receiveTransferIfNeeded(ready)
+
+        case .metadataRefreshResult(let result):
+            logger.info("metadata_refresh_result request_id=\(result.requestID, privacy: .public) succeeded=\(result.succeeded, privacy: .public)")
+            if !result.succeeded {
+                pendingError = result.error ?? "metadata refresh failed"
+            }
+
+        case .branchChangesResult(let result):
+            logger.info("branch_changes_result request_id=\(result.requestID, privacy: .public) thread_id=\(result.threadID, privacy: .public) succeeded=\(result.succeeded, privacy: .public)")
+            branchChangesByThread[result.threadID] = result
+            if !result.succeeded {
+                pendingError = result.error ?? "branch changes failed"
+            }
+
+        case .approvalRequest(let approval):
+            runtimeState = .waitingApproval
+            if let index = approvals.firstIndex(where: { $0.approvalID == approval.approvalID }) {
+                approvals[index] = ApprovalSummary(
+                    approvalID: approval.approvalID,
+                    threadID: approval.threadID,
+                    agentID: approval.agentID,
+                    approvalType: approval.approvalType,
+                    requestMethod: approval.requestMethod ?? approvals[index].requestMethod,
+                    paramsJSON: approval.paramsJSON ?? approvals[index].paramsJSON,
+                    status: approval.status,
+                    updatedAt: approval.updatedAt
+                )
+            } else {
+                approvals.insert(approval, at: 0)
+            }
+
+        case .userInputRequest(let request):
+            runtimeState = .waitingApproval
+            if let index = userInputRequests.firstIndex(where: { $0.requestID == request.requestID }) {
+                let questions = request.questions.isEmpty ? userInputRequests[index].questions : request.questions
+                userInputRequests[index] = UserInputRequestSummary(
+                    requestID: request.requestID,
+                    threadID: request.threadID,
+                    agentID: request.agentID,
+                    questions: questions,
+                    status: request.status,
+                    updatedAt: request.updatedAt
+                )
+            } else {
+                userInputRequests.insert(request, at: 0)
+            }
+
+        case .deviceStatus(let agentID, let online):
+            guard let index = pairedAgents.firstIndex(where: { $0.agentID == agentID }) else { return }
+            pairedAgents[index].isOnline = online
+            persistPairedAgents()
+
+        case .projectSync(let project):
+            if let index = projects.firstIndex(where: { $0.projectID == project.projectID }) {
+                projects[index] = project
+            } else {
+                projects.insert(project, at: 0)
+            }
+            dataStore.upsertProject(project)
+
+        case .threadSync(let thread):
+            if thread.status == .archived {
+                deleteArchivedThread(thread)
+                return
+            }
+            upsertThreadSummary(thread)
+
+        case .threadSyncCompleted(let completion):
+            // Completion is the authoritative end-of-batch signal. The app does
+            // not infer completion from the absence of updates or from timers.
+            logger.info("thread_sync_completed thread_id=\(completion.threadID, privacy: .public) cursor=\(completion.cursor, privacy: .public) entry_count=\(completion.entryCount, privacy: .public) checkpoint_present=\((completion.checkpoint != nil), privacy: .public)")
+            threadSyncPipeline.submit(.completed(completion))
+
+        case .threadSyncFailed(let failure):
+            logger.error("thread_sync_failed thread_id=\(failure.threadID, privacy: .public) cursor=\(failure.cursor, privacy: .public) error=\(failure.error, privacy: .public)")
+            threadSyncPipeline.submit(.failed(failure))
+
+        case .modelSync(let state):
+            applyModelSync(state)
+        }
+    }
+
+    /// Inserts an optimistic local user prompt that will be replaced by desktop replay.
+    /// - Returns: Local thread and entry ids for rollback if WebSocket send fails.
+}

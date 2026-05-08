@@ -1,0 +1,1918 @@
+//! Agent WebSocket channel for server-routed mobile control messages.
+
+use std::collections::HashMap;
+use std::sync::Arc;
+
+use anyhow::{Context, Result};
+use futures_util::{Sink, SinkExt, StreamExt};
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
+use tokio::sync::{RwLock, broadcast};
+use tokio::time::{Duration, sleep};
+use tokio_tungstenite::{connect_async, tungstenite::Message};
+use tracing::{info, warn};
+use url::Url;
+
+use crate::bindings::{self, PairedDeviceBinding};
+use crate::codex_app_server::CodexAppServerClient;
+use crate::config::GatewayConfig;
+use crate::crypto;
+use crate::diff_summary;
+use crate::identity::AgentIdentity;
+use crate::metadata::{self, CodexMetadataProjector, CodexThreadRecord, CodexWorkspaceStore};
+use crate::pairing::PairingRuntimeState;
+use crate::server::NiumaServerClient;
+use crate::tasks::{ResumeThreadInbound, TaskRuntime, TaskStartInbound};
+use crate::thread_status::normalize_thread_status;
+use crate::transfers::{self, TransferContext, TransferReady, TransferStore};
+
+const CONVERSATION_PROJECT_ID: &str = "__conversation__";
+
+#[derive(Debug, Deserialize)]
+struct PairHandshakeMessage {
+    request_id: String,
+    device_id: String,
+    agent_id: String,
+    pair_token: String,
+    binding_id: String,
+    agent_pairing_public_key: String,
+    encrypted_handshake: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct EncryptedHandshakeEnvelope {
+    ios_encryption_public_key: String,
+    nonce: String,
+    ciphertext: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct PairHandshakePlaintext {
+    device_id: String,
+    ios_encryption_public_key: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct MetadataRefreshMessage {
+    request_id: String,
+    device_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct BranchChangesRequest {
+    request_id: String,
+    device_id: String,
+    thread_id: String,
+    base_ref: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct PairHandshakeAck {
+    kind: &'static str,
+    request_id: String,
+    device_id: String,
+    agent_id: String,
+    pair_token: String,
+    binding_id: String,
+    handshake_hash: String,
+    ack_status: String,
+    signature: Option<String>,
+    error: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct ActiveThread {
+    device_id: String,
+    cursor: i64,
+    checkpoint: Option<String>,
+    project_id: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct PendingApproval {
+    approval_id: String,
+    request_id: Value,
+    method: String,
+    thread_id: String,
+    params: Value,
+}
+
+#[derive(Debug, Clone)]
+struct PendingUserInput {
+    request_id: String,
+    app_server_request_id: Value,
+    thread_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct EncryptedMobilePayload {
+    device_id: String,
+    ciphertext: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct ApprovalResponseInbound {
+    approval_id: String,
+    decision: String,
+    grant_scope: Option<Value>,
+}
+
+#[derive(Debug, Deserialize)]
+struct UserInputResponseInbound {
+    request_id: String,
+    answers: Value,
+}
+
+/// Keep the authenticated agent WebSocket online in the background.
+pub fn spawn_agent_channel(
+    identity: AgentIdentity,
+    config: GatewayConfig,
+    session_token: Option<Arc<RwLock<String>>>,
+    pairing: Arc<RwLock<PairingRuntimeState>>,
+    codex_app_server: Option<CodexAppServerClient>,
+    server: Option<NiumaServerClient>,
+) {
+    let Some(session_token) = session_token else {
+        return;
+    };
+    let transfer_context = server.and_then(|server| {
+        Some(TransferContext {
+            server,
+            session_token: session_token.clone(),
+            agent_id: identity.agent_id.clone(),
+            identity: identity.clone(),
+            #[cfg(test)]
+            test_bindings: Default::default(),
+            store: TransferStore::open().ok()?,
+        })
+    });
+    let active_threads = Arc::new(RwLock::new(HashMap::new()));
+    let pending_approvals = Arc::new(RwLock::new(HashMap::new()));
+    let pending_user_inputs = Arc::new(RwLock::new(HashMap::new()));
+    tokio::spawn(async move {
+        loop {
+            let current_session_token = session_token.read().await.clone();
+            if let Err(err) = run_agent_channel(
+                &identity,
+                &config,
+                &current_session_token,
+                pairing.clone(),
+                codex_app_server.clone(),
+                active_threads.clone(),
+                transfer_context.clone(),
+                pending_approvals.clone(),
+                pending_user_inputs.clone(),
+            )
+            .await
+            {
+                warn!("agent websocket disconnected: {err:#}");
+            }
+            sleep(Duration::from_secs(2)).await;
+        }
+    });
+}
+
+async fn run_agent_channel(
+    identity: &AgentIdentity,
+    config: &GatewayConfig,
+    session_token: &str,
+    pairing: Arc<RwLock<PairingRuntimeState>>,
+    codex_app_server: Option<CodexAppServerClient>,
+    active_threads: Arc<RwLock<HashMap<String, ActiveThread>>>,
+    transfer_context: Option<TransferContext>,
+    pending_approvals: Arc<RwLock<HashMap<String, PendingApproval>>>,
+    pending_user_inputs: Arc<RwLock<HashMap<String, PendingUserInput>>>,
+) -> Result<()> {
+    let url = agent_ws_url(&config.server_url, &identity.agent_id, session_token)?;
+    let (socket, _) = connect_async(url.as_str())
+        .await
+        .with_context(|| format!("failed to connect agent websocket {url}"))?;
+    info!("agent websocket connected");
+    let (mut writer, mut reader) = socket.split();
+    let mut notifications = codex_app_server
+        .as_ref()
+        .map(CodexAppServerClient::subscribe_notifications);
+    loop {
+        tokio::select! {
+            message = reader.next() => {
+                let Some(message) = message else {
+                    break;
+                };
+                let message = message?;
+                let Message::Text(text) = message else {
+                    continue;
+                };
+                let value: serde_json::Value = serde_json::from_str(&text)?;
+                handle_server_payload(
+                    &mut writer,
+                    identity,
+                    pairing.clone(),
+                    codex_app_server.clone(),
+                    active_threads.clone(),
+                    transfer_context.clone(),
+                    pending_approvals.clone(),
+                    pending_user_inputs.clone(),
+                    value,
+                ).await?;
+            }
+            notification = next_notification(&mut notifications), if notifications.is_some() => {
+                if let Some(notification) = notification {
+                    handle_app_server_notification(
+                        &mut writer,
+                        codex_app_server.clone(),
+                        identity,
+                        active_threads.clone(),
+                        transfer_context.clone(),
+                        pending_approvals.clone(),
+                        pending_user_inputs.clone(),
+                        notification,
+                    ).await?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn handle_server_payload<S, E>(
+    writer: &mut S,
+    identity: &AgentIdentity,
+    pairing: Arc<RwLock<PairingRuntimeState>>,
+    codex_app_server: Option<CodexAppServerClient>,
+    active_threads: Arc<RwLock<HashMap<String, ActiveThread>>>,
+    transfer_context: Option<TransferContext>,
+    pending_approvals: Arc<RwLock<HashMap<String, PendingApproval>>>,
+    pending_user_inputs: Arc<RwLock<HashMap<String, PendingUserInput>>>,
+    value: Value,
+) -> Result<()>
+where
+    S: Sink<Message, Error = E> + Unpin,
+    E: std::error::Error + Send + Sync + 'static,
+{
+    match value.get("kind").and_then(|kind| kind.as_str()) {
+        Some("pair_handshake") => {
+            let inbound: PairHandshakeMessage = serde_json::from_value(value)?;
+            let ack = handle_pair_handshake(identity, pairing, inbound).await;
+            writer
+                .send(Message::Text(serde_json::to_string(&ack)?.into()))
+                .await?;
+        }
+        Some("metadata_refresh") => {
+            let inbound: MetadataRefreshMessage = serde_json::from_value(value)?;
+            handle_metadata_refresh(writer, codex_app_server, inbound).await?;
+        }
+        Some("task_start") => {
+            let inbound: TaskStartInbound = serde_json::from_value(value)?;
+            handle_task_start(
+                writer,
+                identity,
+                codex_app_server,
+                active_threads,
+                transfer_context,
+                inbound,
+            )
+            .await?;
+        }
+        Some("resume_thread") => {
+            let inbound: ResumeThreadInbound = serde_json::from_value(value)?;
+            handle_resume_thread(
+                writer,
+                identity,
+                codex_app_server,
+                active_threads,
+                transfer_context,
+                inbound,
+            )
+            .await?;
+        }
+        Some("branch_changes_request") => {
+            let inbound: BranchChangesRequest = serde_json::from_value(value)?;
+            handle_branch_changes_request(
+                writer,
+                identity,
+                codex_app_server.as_ref(),
+                transfer_context.as_ref(),
+                inbound,
+            )
+            .await?;
+        }
+        Some("transfer_ready") => {
+            let inbound: TransferReady = serde_json::from_value(value)?;
+            handle_transfer_ready(transfer_context.as_ref(), inbound).await?;
+        }
+        Some("approval_response") => {
+            let inbound = decrypt_approval_response(identity, value)?;
+            if let Some(sync) =
+                handle_approval_response(codex_app_server, pending_approvals, inbound).await?
+            {
+                send_wire_message(writer, sync).await?;
+            }
+        }
+        Some("user_input_response") => {
+            let inbound = decrypt_user_input_response(identity, value)?;
+            if let Some(sync) =
+                handle_user_input_response(codex_app_server, pending_user_inputs, inbound).await?
+            {
+                send_wire_message(writer, sync).await?;
+            }
+        }
+        Some(kind) => {
+            warn!("unsupported agent websocket message kind={kind}");
+        }
+        None => warn!("agent websocket message missing kind"),
+    }
+    Ok(())
+}
+
+async fn handle_task_start<S, E>(
+    writer: &mut S,
+    identity: &AgentIdentity,
+    codex_app_server: Option<CodexAppServerClient>,
+    active_threads: Arc<RwLock<HashMap<String, ActiveThread>>>,
+    transfer_context: Option<TransferContext>,
+    inbound: TaskStartInbound,
+) -> Result<()>
+where
+    S: Sink<Message, Error = E> + Unpin,
+    E: std::error::Error + Send + Sync + 'static,
+{
+    let device_id = inbound.device_id.clone();
+    let project_id = inbound.project_id.clone();
+    info!(
+        device_id = %device_id,
+        project_id = %project_id,
+        thread_id = ?inbound.thread_id,
+        "gateway_task_start_received"
+    );
+    let fallback_thread_id = inbound
+        .thread_id
+        .clone()
+        .unwrap_or_else(|| "task-start-failed".to_string());
+    let Some(app_server) = codex_app_server else {
+        send_wire_message(
+            writer,
+            encrypt_task_update(
+                identity,
+                task_error_update(
+                    &device_id,
+                    &fallback_thread_id,
+                    "Codex app-server is not connected",
+                ),
+            )?,
+        )
+        .await?;
+        return Ok(());
+    };
+    match TaskRuntime::new(identity.clone(), app_server, transfer_context.clone())
+        .start_task_messages(inbound)
+        .await
+    {
+        Ok(messages) => {
+            send_wire_messages(
+                writer,
+                identity,
+                messages,
+                active_threads,
+                transfer_context.as_ref(),
+            )
+            .await?;
+        }
+        Err(err) => {
+            send_wire_message(
+                writer,
+                encrypt_task_update(
+                    identity,
+                    task_error_update(
+                        &device_id,
+                        &fallback_thread_id,
+                        &err.to_string(),
+                    ),
+                )?,
+            )
+            .await?;
+            warn!("task_start failed: {err:#}");
+        }
+    }
+    Ok(())
+}
+
+async fn handle_resume_thread<S, E>(
+    writer: &mut S,
+    identity: &AgentIdentity,
+    codex_app_server: Option<CodexAppServerClient>,
+    active_threads: Arc<RwLock<HashMap<String, ActiveThread>>>,
+    transfer_context: Option<TransferContext>,
+    inbound: ResumeThreadInbound,
+) -> Result<()>
+where
+    S: Sink<Message, Error = E> + Unpin,
+    E: std::error::Error + Send + Sync + 'static,
+{
+    let device_id = inbound.device_id.clone();
+    let thread_id = inbound.thread_id.clone();
+    let cursor = inbound.cursor;
+    let checkpoint = inbound.checkpoint.clone();
+    let Some(app_server) = codex_app_server else {
+        send_wire_message(
+            writer,
+            thread_sync_failed(
+                &device_id,
+                &thread_id,
+                cursor,
+                checkpoint.as_deref(),
+                "Codex app-server is not connected",
+            ),
+        )
+        .await?;
+        return Ok(());
+    };
+    match TaskRuntime::new(identity.clone(), app_server, transfer_context.clone())
+        .resume_thread_messages(inbound)
+        .await
+    {
+        Ok(messages) => {
+            let entry_count = messages.len();
+            let completed_cursor = messages
+                .iter()
+                .filter_map(|message| message.get("seq").and_then(|seq| seq.as_i64()))
+                .max()
+                .unwrap_or(cursor);
+            send_wire_messages(
+                writer,
+                identity,
+                messages,
+                active_threads,
+                transfer_context.as_ref(),
+            )
+            .await?;
+            send_wire_message(
+                writer,
+                json!({
+                    "kind": "thread_sync_completed",
+                    "device_id": device_id,
+                    "thread_id": thread_id,
+                    "cursor": completed_cursor,
+                    "checkpoint": checkpoint,
+                    "entry_count": entry_count,
+                }),
+            )
+            .await?;
+        }
+        Err(err) => {
+            send_wire_message(
+                writer,
+                thread_sync_failed(
+                    &device_id,
+                    &thread_id,
+                    cursor,
+                    checkpoint.as_deref(),
+                    &err.to_string(),
+                ),
+            )
+            .await?;
+            warn!("resume_thread failed thread_id={thread_id}: {err:#}");
+        }
+    }
+    Ok(())
+}
+
+async fn handle_branch_changes_request<S, E>(
+    writer: &mut S,
+    identity: &AgentIdentity,
+    app_server: Option<&CodexAppServerClient>,
+    transfer_context: Option<&TransferContext>,
+    inbound: BranchChangesRequest,
+) -> Result<()>
+where
+    S: Sink<Message, Error = E> + Unpin,
+    E: std::error::Error + Send + Sync + 'static,
+{
+    let result = branch_changes_payload(app_server, transfer_context, &inbound).await;
+    let wire = match result {
+        Ok(payload) => branch_changes_wire(identity, &inbound, "branch_changes_result", payload)?,
+        Err(err) => {
+            warn!(
+                "branch_changes_request failed thread_id={} request_id={}: {err:#}",
+                inbound.thread_id, inbound.request_id
+            );
+            branch_changes_wire(
+                identity,
+                &inbound,
+                "branch_changes_failed",
+                json!({ "error": err.to_string() }),
+            )?
+        }
+    };
+    send_wire_message(writer, wire).await
+}
+
+async fn branch_changes_payload(
+    app_server: Option<&CodexAppServerClient>,
+    transfer_context: Option<&TransferContext>,
+    inbound: &BranchChangesRequest,
+) -> Result<Value> {
+    let cwd = branch_changes_cwd(app_server, &inbound.thread_id)
+        .await
+        .context("thread has no Git workspace")?;
+    let changes = diff_summary::branch_changes(&cwd, inbound.base_ref.as_deref()).await?;
+    let context = transfer_context.context("transfer context is unavailable")?;
+    let bundle = serde_json::to_string_pretty(&changes.bundle)?;
+    let (transfer_id, size_bytes) = context
+        .upload_json_attachment(&inbound.device_id, bundle)
+        .await?;
+    Ok(json!({
+        "summary": changes.summary,
+        "files_summary": changes.files_summary,
+        "transfer_id": transfer_id,
+        "size_bytes": size_bytes,
+        "base_ref": inbound.base_ref,
+    }))
+}
+
+async fn branch_changes_cwd(
+    app_server: Option<&CodexAppServerClient>,
+    thread_id: &str,
+) -> Option<String> {
+    if let Some(app_server) = app_server {
+        if let Ok(payload) = app_server.read_thread_payload(thread_id, false).await {
+            if let Some(cwd) = string_field(&payload, "cwd") {
+                return Some(cwd);
+            }
+        }
+    }
+    None
+}
+
+fn branch_changes_wire(
+    identity: &AgentIdentity,
+    inbound: &BranchChangesRequest,
+    kind: &str,
+    plaintext: Value,
+) -> Result<Value> {
+    let aad = crypto::payload_aad(&[
+        ("kind", kind.to_string()),
+        ("device_id", inbound.device_id.clone()),
+        ("agent_id", identity.agent_id.clone()),
+        ("request_id", inbound.request_id.clone()),
+        ("thread_id", inbound.thread_id.clone()),
+    ]);
+    let ciphertext = encrypt_for_mobile(
+        identity,
+        &inbound.device_id,
+        &serde_json::to_vec(&plaintext)?,
+        &aad,
+    )?;
+    Ok(json!({
+        "kind": kind,
+        "device_id": inbound.device_id.clone(),
+        "request_id": inbound.request_id.clone(),
+        "thread_id": inbound.thread_id.clone(),
+        "ciphertext": ciphertext,
+    }))
+}
+
+async fn handle_app_server_notification<S, E>(
+    writer: &mut S,
+    codex_app_server: Option<CodexAppServerClient>,
+    identity: &AgentIdentity,
+    active_threads: Arc<RwLock<HashMap<String, ActiveThread>>>,
+    transfer_context: Option<TransferContext>,
+    pending_approvals: Arc<RwLock<HashMap<String, PendingApproval>>>,
+    pending_user_inputs: Arc<RwLock<HashMap<String, PendingUserInput>>>,
+    notification: Value,
+) -> Result<()>
+where
+    S: Sink<Message, Error = E> + Unpin,
+    E: std::error::Error + Send + Sync + 'static,
+{
+    if is_app_server_request(&notification) {
+        handle_app_server_request(
+            writer,
+            codex_app_server,
+            identity,
+            active_threads,
+            pending_approvals,
+            pending_user_inputs,
+            notification,
+        )
+        .await?;
+        return Ok(());
+    }
+    for sync in resolved_request_syncs(
+        &notification,
+        pending_approvals.clone(),
+        pending_user_inputs.clone(),
+    )
+    .await
+    {
+        send_wire_message(writer, sync).await?;
+    }
+    match notification_metadata_syncs(
+        codex_app_server.as_ref(),
+        active_threads.clone(),
+        &notification,
+    )
+    .await
+    {
+        Ok(syncs) => {
+            for sync in syncs {
+                send_wire_message(writer, sync).await?;
+            }
+        }
+        Err(err) => warn!("app-server metadata notification projection failed: {err:#}"),
+    }
+    let Some(thread_id) = notification_thread_id(&notification) else {
+        return Ok(());
+    };
+    let Some(active) = active_threads.read().await.get(&thread_id).cloned() else {
+        return Ok(());
+    };
+    let Some(app_server) = codex_app_server else {
+        return Ok(());
+    };
+    let device_id = active.device_id.clone();
+    let cursor = active.cursor;
+    let checkpoint = active.checkpoint.clone();
+    let should_push_progress = is_task_progress_push_trigger(&notification);
+    let inbound = ResumeThreadInbound {
+        device_id: device_id.clone(),
+        thread_id: thread_id.clone(),
+        cursor,
+        checkpoint: checkpoint.clone(),
+    };
+    match TaskRuntime::new(identity.clone(), app_server, transfer_context.clone())
+        .resume_thread_messages(inbound)
+        .await
+    {
+        Ok(messages) if !messages.is_empty() => {
+            let completion = thread_sync_completed(
+                &device_id,
+                &thread_id,
+                cursor,
+                checkpoint.as_deref(),
+                &messages,
+            );
+            send_wire_messages(
+                writer,
+                identity,
+                messages,
+                active_threads,
+                transfer_context.as_ref(),
+            )
+            .await?;
+            send_wire_message(writer, completion).await?;
+            if should_push_progress {
+                send_wire_message(
+                    writer,
+                    task_progress_push_wire(identity, &device_id, &thread_id)?,
+                )
+                .await?;
+            }
+        }
+        Ok(_) => {}
+        Err(err) => warn!("app-server notification projection failed: {err:#}"),
+    }
+    Ok(())
+}
+
+async fn notification_metadata_syncs(
+    app_server: Option<&CodexAppServerClient>,
+    active_threads: Arc<RwLock<HashMap<String, ActiveThread>>>,
+    notification: &Value,
+) -> Result<Vec<Value>> {
+    let Some(method) = notification_method(notification) else {
+        return Ok(Vec::new());
+    };
+    match method {
+        "thread/started" => {
+            let Some(thread_payload) = notification_thread_payload(notification) else {
+                return Ok(Vec::new());
+            };
+            let record =
+                metadata_record_from_payload(thread_payload, None, active_threads, None).await;
+            Ok(metadata::thread_metadata_wire_messages(&record))
+        }
+        "thread/status/changed" => {
+            let Some(thread_id) = notification_thread_id(notification) else {
+                return Ok(Vec::new());
+            };
+            let status = normalize_thread_status(notification_status(notification), false);
+            metadata_syncs_for_thread_id(app_server, active_threads, &thread_id, Some(status)).await
+        }
+        "thread/archived" => {
+            let Some(thread_id) = notification_thread_id(notification) else {
+                return Ok(Vec::new());
+            };
+            metadata_syncs_for_thread_id(
+                app_server,
+                active_threads,
+                &thread_id,
+                Some("archived".to_string()),
+            )
+            .await
+        }
+        "thread/unarchived" => {
+            let Some(thread_id) = notification_thread_id(notification) else {
+                return Ok(Vec::new());
+            };
+            metadata_syncs_for_thread_id(app_server, active_threads, &thread_id, None).await
+        }
+        "thread/closed" => {
+            let Some(thread_id) = notification_thread_id(notification) else {
+                return Ok(Vec::new());
+            };
+            metadata_syncs_for_thread_id(
+                app_server,
+                active_threads,
+                &thread_id,
+                Some("closed".to_string()),
+            )
+            .await
+        }
+        _ => Ok(Vec::new()),
+    }
+}
+
+async fn metadata_syncs_for_thread_id(
+    app_server: Option<&CodexAppServerClient>,
+    active_threads: Arc<RwLock<HashMap<String, ActiveThread>>>,
+    thread_id: &str,
+    status_override: Option<String>,
+) -> Result<Vec<Value>> {
+    let thread_payload = match app_server {
+        Some(app_server) => app_server
+            .read_thread_payload(thread_id, false)
+            .await
+            .unwrap_or_else(|_| json!({ "id": thread_id })),
+        None => json!({ "id": thread_id }),
+    };
+    let record = metadata_record_from_payload(
+        &thread_payload,
+        Some(thread_id),
+        active_threads,
+        status_override,
+    )
+    .await;
+    Ok(metadata::thread_metadata_wire_messages(&record))
+}
+
+async fn metadata_record_from_payload(
+    payload: &Value,
+    fallback_thread_id: Option<&str>,
+    active_threads: Arc<RwLock<HashMap<String, ActiveThread>>>,
+    status_override: Option<String>,
+) -> CodexThreadRecord {
+    let thread_id = string_field(payload, "id")
+        .or_else(|| fallback_thread_id.map(str::to_string))
+        .unwrap_or_else(|| "unknown-thread".to_string());
+    let active = active_threads.read().await.get(&thread_id).cloned();
+    let cwd = string_field(payload, "cwd");
+    let workspace_store = CodexWorkspaceStore::new();
+    let project_id = active
+        .as_ref()
+        .and_then(|active| active.project_id.clone())
+        .or_else(|| {
+            cwd.as_deref()
+                .and_then(|cwd| workspace_store.project_for_cwd(cwd))
+                .map(|project| project.project_id)
+        })
+        .unwrap_or_else(|| CONVERSATION_PROJECT_ID.to_string());
+    let title = string_field(payload, "name")
+        .or_else(|| string_field(payload, "preview"))
+        .unwrap_or_else(|| thread_id.clone());
+    CodexThreadRecord {
+        thread_id,
+        project_id,
+        cwd,
+        title,
+        status: status_override
+            .unwrap_or_else(|| normalize_thread_status(payload.get("status"), false)),
+        last_checkpoint_seen: None,
+        updated_at: number_field(payload, "updatedAt").or_else(|| Some(unix_timestamp() as f64)),
+    }
+}
+
+async fn handle_transfer_ready(
+    transfer_context: Option<&TransferContext>,
+    inbound: TransferReady,
+) -> Result<()> {
+    let Some(transfer_context) = transfer_context else {
+        return Ok(());
+    };
+    if let Err(err) = transfer_context.handle_transfer_ready(&inbound).await {
+        warn!(
+            "transfer_ready cache failed transfer_id={} direction={}: {err:#}",
+            inbound.transfer_id, inbound.direction
+        );
+    }
+    Ok(())
+}
+
+async fn handle_app_server_request<S, E>(
+    writer: &mut S,
+    codex_app_server: Option<CodexAppServerClient>,
+    identity: &AgentIdentity,
+    active_threads: Arc<RwLock<HashMap<String, ActiveThread>>>,
+    pending_approvals: Arc<RwLock<HashMap<String, PendingApproval>>>,
+    pending_user_inputs: Arc<RwLock<HashMap<String, PendingUserInput>>>,
+    request: Value,
+) -> Result<()>
+where
+    S: Sink<Message, Error = E> + Unpin,
+    E: std::error::Error + Send + Sync + 'static,
+{
+    let Some(app_server) = codex_app_server else {
+        return Ok(());
+    };
+    let method = request
+        .get("method")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let request_id = request.get("id").cloned().unwrap_or(Value::Null);
+    let params = request.get("params").cloned().unwrap_or_else(|| json!({}));
+    if method == "item/tool/requestUserInput" {
+        if let Some((message, pending)) = build_user_input_request(&request_id, &params).await {
+            pending_user_inputs
+                .write()
+                .await
+                .insert(pending.request_id.clone(), pending);
+            if let Some(device_id) =
+                active_device_for_thread(&active_threads, &message.thread_id).await
+            {
+                send_wire_message(
+                    writer,
+                    user_input_request_wire(identity, &device_id, &message)?,
+                )
+                .await?;
+            }
+        } else {
+            app_server
+                .respond_error(request_id, -32600, "invalid request_user_input payload")
+                .await?;
+        }
+        return Ok(());
+    }
+    if let Some(approval_type) = approval_type_for_method(&method) {
+        if let Some((message, pending)) =
+            build_approval_request(&request_id, &method, approval_type, &params).await
+        {
+            pending_approvals
+                .write()
+                .await
+                .insert(pending.approval_id.clone(), pending);
+            if let Some(device_id) =
+                active_device_for_thread(&active_threads, &message.thread_id).await
+            {
+                send_wire_message(
+                    writer,
+                    approval_request_wire(identity, &device_id, &message)?,
+                )
+                .await?;
+            }
+        } else {
+            app_server
+                .respond_error(request_id, -32600, "invalid approval payload")
+                .await?;
+        }
+        return Ok(());
+    }
+    app_server
+        .respond(
+            request_id,
+            json!({
+                "unsupported": true,
+                "method": method,
+            }),
+        )
+        .await?;
+    Ok(())
+}
+
+async fn handle_approval_response(
+    codex_app_server: Option<CodexAppServerClient>,
+    pending_approvals: Arc<RwLock<HashMap<String, PendingApproval>>>,
+    inbound: ApprovalResponseInbound,
+) -> Result<Option<Value>> {
+    let Some(app_server) = codex_app_server else {
+        return Ok(None);
+    };
+    let Some(pending) = pending_approvals.write().await.remove(&inbound.approval_id) else {
+        return Ok(None);
+    };
+    match pending.method.as_str() {
+        "item/commandExecution/requestApproval" | "item/fileChange/requestApproval" => {
+            app_server
+                .respond(
+                    pending.request_id,
+                    json!({ "decision": approval_decision(&inbound) }),
+                )
+                .await?;
+        }
+        "item/permissions/requestApproval" => {
+            if inbound.decision != "allow" {
+                app_server
+                    .respond_error(
+                        pending.request_id,
+                        -32001,
+                        "permission request rejected by mobile client",
+                    )
+                    .await?;
+            } else {
+                app_server
+                    .respond(
+                        pending.request_id,
+                        json!({
+                            "permissions": pending.params.get("permissions").cloned().unwrap_or_else(|| json!({})),
+                            "scope": permission_grant_scope(&inbound),
+                        }),
+                    )
+                    .await?;
+            }
+        }
+        _ => {
+            app_server
+                .respond_error(pending.request_id, -32601, "unsupported approval method")
+                .await?;
+        }
+    }
+    Ok(Some(approval_sync(
+        &pending.approval_id,
+        &pending.thread_id,
+        approval_type_for_method(&pending.method).unwrap_or("unknown"),
+        "resolved",
+    )))
+}
+
+async fn handle_user_input_response(
+    codex_app_server: Option<CodexAppServerClient>,
+    pending_user_inputs: Arc<RwLock<HashMap<String, PendingUserInput>>>,
+    inbound: UserInputResponseInbound,
+) -> Result<Option<Value>> {
+    let Some(app_server) = codex_app_server else {
+        return Ok(None);
+    };
+    let Some(pending) = pending_user_inputs
+        .write()
+        .await
+        .remove(&inbound.request_id)
+    else {
+        return Ok(None);
+    };
+    app_server
+        .respond(
+            pending.app_server_request_id,
+            json!({ "answers": inbound.answers }),
+        )
+        .await?;
+    Ok(Some(user_input_sync(
+        &pending.request_id,
+        &pending.thread_id,
+        "resolved",
+    )))
+}
+
+async fn handle_metadata_refresh<S, E>(
+    writer: &mut S,
+    codex_app_server: Option<CodexAppServerClient>,
+    inbound: MetadataRefreshMessage,
+) -> Result<()>
+where
+    S: Sink<Message, Error = E> + Unpin,
+    E: std::error::Error + Send + Sync + 'static,
+{
+    let Some(app_server) = codex_app_server else {
+        send_wire_message(
+            writer,
+            json!({
+                "kind": "metadata_refresh_failed",
+                "device_id": inbound.device_id,
+                "request_id": inbound.request_id,
+                "error": "Codex app-server is not connected",
+            }),
+        )
+        .await?;
+        return Ok(());
+    };
+
+    match CodexMetadataProjector::new(app_server).snapshot().await {
+        Ok(snapshot) => {
+            for message in metadata::snapshot_wire_messages(&snapshot) {
+                send_wire_message(writer, message).await?;
+            }
+            send_wire_message(
+                writer,
+                json!({
+                    "kind": "metadata_refresh_completed",
+                    "device_id": inbound.device_id,
+                    "request_id": inbound.request_id,
+                    "project_count": snapshot.projects.len(),
+                    "thread_count": snapshot.threads.len(),
+                    "approval_count": 0,
+                }),
+            )
+            .await?;
+            info!(
+                "metadata refresh completed request_id={} projects={} threads={}",
+                inbound.request_id,
+                snapshot.projects.len(),
+                snapshot.threads.len()
+            );
+        }
+        Err(err) => {
+            send_wire_message(
+                writer,
+                json!({
+                    "kind": "metadata_refresh_failed",
+                    "device_id": inbound.device_id,
+                    "request_id": inbound.request_id,
+                    "error": err.to_string(),
+                }),
+            )
+            .await?;
+            warn!(
+                "metadata refresh failed request_id={}: {err:#}",
+                inbound.request_id
+            );
+        }
+    }
+    Ok(())
+}
+
+fn task_error_update(
+    device_id: &str,
+    thread_id: &str,
+    error: &str,
+) -> serde_json::Value {
+    json!({
+        "kind": "task_update",
+        "device_id": device_id,
+        "thread_id": thread_id,
+        "seq": 1,
+        "ciphertext": error,
+        "checkpoint": null,
+        "role": "system",
+        "type": "systemMessage",
+        "phase": "failed",
+        "project_id": null,
+        "entry_id": format!("{thread_id}:error"),
+        "created_at": null,
+    })
+}
+
+#[derive(Debug, Clone)]
+struct ApprovalWireData {
+    approval_id: String,
+    thread_id: String,
+    approval_type: String,
+    ciphertext: String,
+}
+
+#[derive(Debug, Clone)]
+struct UserInputWireData {
+    request_id: String,
+    thread_id: String,
+    questions: Vec<Value>,
+}
+
+async fn active_device_for_thread(
+    active_threads: &Arc<RwLock<HashMap<String, ActiveThread>>>,
+    thread_id: &str,
+) -> Option<String> {
+    active_threads
+        .read()
+        .await
+        .get(thread_id)
+        .map(|active| active.device_id.clone())
+}
+
+async fn build_approval_request(
+    app_server_request_id: &Value,
+    method: &str,
+    approval_type: &str,
+    params: &Value,
+) -> Option<(ApprovalWireData, PendingApproval)> {
+    let thread_id = params.get("threadId")?.as_str()?.to_string();
+    let approval_id = params
+        .get("approvalId")
+        .or_else(|| params.get("itemId"))
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .unwrap_or_else(|| request_id_string(app_server_request_id));
+    let pending = PendingApproval {
+        approval_id: approval_id.clone(),
+        request_id: app_server_request_id.clone(),
+        method: method.to_string(),
+        thread_id: thread_id.clone(),
+        params: params.clone(),
+    };
+    let message = ApprovalWireData {
+        approval_id,
+        thread_id,
+        approval_type: approval_type.to_string(),
+        ciphertext: serde_json::to_string(&json!({
+            "method": method,
+            "params": params,
+        }))
+        .ok()?,
+    };
+    Some((message, pending))
+}
+
+async fn build_user_input_request(
+    app_server_request_id: &Value,
+    params: &Value,
+) -> Option<(UserInputWireData, PendingUserInput)> {
+    let thread_id = params.get("threadId")?.as_str()?.to_string();
+    let request_id = params
+        .get("itemId")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .unwrap_or_else(|| request_id_string(app_server_request_id));
+    let questions = params
+        .get("questions")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .map(project_user_input_question)
+        .collect();
+    let pending = PendingUserInput {
+        request_id: request_id.clone(),
+        app_server_request_id: app_server_request_id.clone(),
+        thread_id: thread_id.clone(),
+    };
+    Some((
+        UserInputWireData {
+            request_id,
+            thread_id,
+            questions,
+        },
+        pending,
+    ))
+}
+
+fn approval_request_wire(
+    identity: &AgentIdentity,
+    device_id: &str,
+    message: &ApprovalWireData,
+) -> Result<Value> {
+    let aad = crypto::payload_aad(&[
+        ("kind", "approval_request".to_string()),
+        ("device_id", device_id.to_string()),
+        ("agent_id", identity.agent_id.clone()),
+        ("approval_id", message.approval_id.clone()),
+        ("thread_id", message.thread_id.clone()),
+        ("approval_type", message.approval_type.clone()),
+    ]);
+    let ciphertext = encrypt_for_mobile(identity, device_id, message.ciphertext.as_bytes(), &aad)?;
+    Ok(json!({
+        "kind": "approval_request",
+        "device_id": device_id,
+        "approval_id": message.approval_id,
+        "thread_id": message.thread_id,
+        "approval_type": message.approval_type,
+        "ciphertext": ciphertext,
+    }))
+}
+
+fn user_input_request_wire(
+    identity: &AgentIdentity,
+    device_id: &str,
+    message: &UserInputWireData,
+) -> Result<Value> {
+    let aad = crypto::payload_aad(&[
+        ("kind", "user_input_request".to_string()),
+        ("device_id", device_id.to_string()),
+        ("agent_id", identity.agent_id.clone()),
+        ("request_id", message.request_id.clone()),
+        ("thread_id", message.thread_id.clone()),
+        ("status", "pending".to_string()),
+    ]);
+    let plaintext = serde_json::to_vec(&json!({ "questions": message.questions }))?;
+    let ciphertext = encrypt_for_mobile(identity, device_id, &plaintext, &aad)?;
+    Ok(json!({
+        "kind": "user_input_request",
+        "device_id": device_id,
+        "request_id": message.request_id,
+        "thread_id": message.thread_id,
+        "status": "pending",
+        "ciphertext": ciphertext,
+    }))
+}
+
+fn task_progress_push_wire(
+    identity: &AgentIdentity,
+    device_id: &str,
+    thread_id: &str,
+) -> Result<Value> {
+    let plaintext = serde_json::to_vec(&json!({
+        "thread_id": thread_id,
+    }))?;
+    let aad = crypto::payload_aad(&[
+        ("kind", "task_progress_push".to_string()),
+        ("device_id", device_id.to_string()),
+        ("agent_id", identity.agent_id.clone()),
+    ]);
+    let ciphertext = encrypt_for_mobile(identity, device_id, &plaintext, &aad)?;
+    Ok(json!({
+        "kind": "task_progress_push",
+        "device_id": device_id,
+        "ciphertext": ciphertext,
+    }))
+}
+
+fn approval_sync(approval_id: &str, thread_id: &str, approval_type: &str, status: &str) -> Value {
+    json!({
+        "kind": "approval_sync",
+        "approval_id": approval_id,
+        "thread_id": thread_id,
+        "approval_type": approval_type,
+        "status": status,
+    })
+}
+
+fn user_input_sync(request_id: &str, thread_id: &str, status: &str) -> Value {
+    json!({
+        "kind": "user_input_sync",
+        "request_id": request_id,
+        "thread_id": thread_id,
+        "status": status,
+    })
+}
+
+fn project_user_input_question(question: Value) -> Value {
+    let options = question
+        .get("options")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|option| {
+            json!({
+                "label": option.get("label").and_then(Value::as_str).unwrap_or_default(),
+                "description": option.get("description").and_then(Value::as_str).unwrap_or_default(),
+            })
+        })
+        .collect::<Vec<_>>();
+    json!({
+        "question_id": question.get("id").and_then(Value::as_str).unwrap_or_default(),
+        "header": question.get("header").and_then(Value::as_str).unwrap_or_default(),
+        "prompt": question.get("question").and_then(Value::as_str).unwrap_or_default(),
+        "options": options,
+        "is_other": question.get("isOther").and_then(Value::as_bool).unwrap_or(false),
+        "is_secret": question.get("isSecret").and_then(Value::as_bool).unwrap_or(false),
+    })
+}
+
+fn approval_type_for_method(method: &str) -> Option<&'static str> {
+    match method {
+        "item/commandExecution/requestApproval" => Some("shell_command"),
+        "item/fileChange/requestApproval" => Some("file_change"),
+        "item/permissions/requestApproval" => Some("permissions"),
+        _ => None,
+    }
+}
+
+fn approval_decision(inbound: &ApprovalResponseInbound) -> &'static str {
+    if inbound.decision != "allow" {
+        "decline"
+    } else if grant_scope_is_session(inbound) {
+        "acceptForSession"
+    } else {
+        "accept"
+    }
+}
+
+fn permission_grant_scope(inbound: &ApprovalResponseInbound) -> &'static str {
+    if grant_scope_is_session(inbound) {
+        "session"
+    } else {
+        "turn"
+    }
+}
+
+fn grant_scope_is_session(inbound: &ApprovalResponseInbound) -> bool {
+    inbound
+        .grant_scope
+        .as_ref()
+        .and_then(|scope| scope.get("scope"))
+        .and_then(Value::as_str)
+        == Some("session")
+}
+
+fn request_id_string(request_id: &Value) -> String {
+    request_id
+        .as_str()
+        .map(str::to_string)
+        .unwrap_or_else(|| request_id.to_string())
+}
+
+fn is_app_server_request(payload: &Value) -> bool {
+    payload.get("method").is_some() && payload.get("id").is_some()
+}
+
+async fn resolved_request_syncs(
+    notification: &Value,
+    pending_approvals: Arc<RwLock<HashMap<String, PendingApproval>>>,
+    pending_user_inputs: Arc<RwLock<HashMap<String, PendingUserInput>>>,
+) -> Vec<Value> {
+    if notification.get("method").and_then(Value::as_str) != Some("serverRequest/resolved") {
+        return Vec::new();
+    }
+    let Some(request_id) = notification
+        .get("params")
+        .and_then(|params| params.get("requestId"))
+        .map(request_id_string)
+    else {
+        return Vec::new();
+    };
+    let mut syncs = Vec::new();
+    let approval = {
+        let approvals = pending_approvals.read().await;
+        approvals
+            .values()
+            .find(|pending| request_id_string(&pending.request_id) == request_id)
+            .cloned()
+    };
+    if let Some(approval) = approval {
+        pending_approvals
+            .write()
+            .await
+            .remove(&approval.approval_id);
+        syncs.push(approval_sync(
+            &approval.approval_id,
+            &approval.thread_id,
+            approval_type_for_method(&approval.method).unwrap_or("unknown"),
+            "resolved",
+        ));
+    }
+    let user_input = {
+        let user_inputs = pending_user_inputs.read().await;
+        user_inputs
+            .values()
+            .find(|pending| request_id_string(&pending.app_server_request_id) == request_id)
+            .cloned()
+    };
+    if let Some(user_input) = user_input {
+        pending_user_inputs
+            .write()
+            .await
+            .remove(&user_input.request_id);
+        syncs.push(user_input_sync(
+            &user_input.request_id,
+            &user_input.thread_id,
+            "resolved",
+        ));
+    }
+    syncs
+}
+
+fn thread_sync_failed(
+    device_id: &str,
+    thread_id: &str,
+    cursor: i64,
+    checkpoint: Option<&str>,
+    error: &str,
+) -> serde_json::Value {
+    json!({
+        "kind": "thread_sync_failed",
+        "device_id": device_id,
+        "thread_id": thread_id,
+        "cursor": cursor,
+        "checkpoint": checkpoint,
+        "error": error,
+    })
+}
+
+async fn send_wire_message<S, E>(writer: &mut S, payload: serde_json::Value) -> Result<()>
+where
+    S: Sink<Message, Error = E> + Unpin,
+    E: std::error::Error + Send + Sync + 'static,
+{
+    writer
+        .send(Message::Text(serde_json::to_string(&payload)?.into()))
+        .await?;
+    Ok(())
+}
+
+async fn send_wire_messages<S, E>(
+    writer: &mut S,
+    identity: &AgentIdentity,
+    messages: Vec<serde_json::Value>,
+    active_threads: Arc<RwLock<HashMap<String, ActiveThread>>>,
+    transfer_context: Option<&TransferContext>,
+) -> Result<()>
+where
+    S: Sink<Message, Error = E> + Unpin,
+    E: std::error::Error + Send + Sync + 'static,
+{
+    for message in messages {
+        let message = transfers::normalize_task_update_transfers(message, transfer_context).await;
+        let message = encrypt_task_update(identity, message)?;
+        track_wire_message(&message, active_threads.clone()).await;
+        send_wire_message(writer, message).await?;
+    }
+    Ok(())
+}
+
+fn thread_sync_completed(
+    device_id: &str,
+    thread_id: &str,
+    fallback_cursor: i64,
+    fallback_checkpoint: Option<&str>,
+    messages: &[serde_json::Value],
+) -> serde_json::Value {
+    json!({
+        "kind": "thread_sync_completed",
+        "device_id": device_id,
+        "thread_id": thread_id,
+        "cursor": completed_cursor(messages, fallback_cursor),
+        "checkpoint": completed_checkpoint(messages, fallback_checkpoint),
+        "entry_count": messages.len(),
+    })
+}
+
+fn completed_cursor(messages: &[serde_json::Value], fallback_cursor: i64) -> i64 {
+    messages
+        .iter()
+        .filter_map(|message| message.get("seq").and_then(Value::as_i64))
+        .max()
+        .unwrap_or(fallback_cursor)
+}
+
+fn completed_checkpoint(
+    messages: &[serde_json::Value],
+    fallback_checkpoint: Option<&str>,
+) -> Option<String> {
+    messages
+        .iter()
+        .rev()
+        .filter_map(|message| message.get("checkpoint").and_then(Value::as_str))
+        .next()
+        .map(str::to_string)
+        .or_else(|| fallback_checkpoint.map(str::to_string))
+}
+
+fn encrypt_task_update(identity: &AgentIdentity, mut payload: Value) -> Result<Value> {
+    if payload.get("kind").and_then(Value::as_str) != Some("task_update") {
+        return Ok(payload);
+    }
+    let device_id = string_field(&payload, "device_id").context("task_update missing device_id")?;
+    let ciphertext =
+        string_field(&payload, "ciphertext").context("task_update missing ciphertext")?;
+    let aad = task_update_aad(identity, &payload, &device_id);
+    payload["ciphertext"] = json!(encrypt_for_mobile(
+        identity,
+        &device_id,
+        ciphertext.as_bytes(),
+        &aad,
+    )?);
+    Ok(payload)
+}
+
+fn encrypt_for_mobile(
+    identity: &AgentIdentity,
+    device_id: &str,
+    plaintext: &[u8],
+    aad: &[u8],
+) -> Result<String> {
+    let binding = bindings::binding_for_device(device_id)?
+        .with_context(|| format!("missing pair binding for device {device_id}"))?;
+    crypto::encrypt_payload(
+        &identity.encryption_private_key,
+        &binding.ios_encryption_public_key,
+        &binding.binding_id,
+        crypto::PayloadDirection::AgentToIos,
+        plaintext,
+        aad,
+    )
+}
+
+fn decrypt_from_mobile(
+    identity: &AgentIdentity,
+    device_id: &str,
+    ciphertext: &str,
+    aad: &[u8],
+) -> Result<Vec<u8>> {
+    let binding = bindings::binding_for_device(device_id)?
+        .with_context(|| format!("missing pair binding for device {device_id}"))?;
+    crypto::decrypt_payload(
+        &identity.encryption_private_key,
+        &binding.ios_encryption_public_key,
+        &binding.binding_id,
+        crypto::PayloadDirection::IosToAgent,
+        ciphertext,
+        aad,
+    )
+}
+
+fn task_update_aad(identity: &AgentIdentity, payload: &Value, device_id: &str) -> Vec<u8> {
+    crypto::payload_aad(&[
+        ("kind", "task_update".to_string()),
+        ("device_id", device_id.to_string()),
+        ("agent_id", identity.agent_id.clone()),
+        (
+            "thread_id",
+            string_field(payload, "thread_id").unwrap_or_default(),
+        ),
+        (
+            "seq",
+            payload
+                .get("seq")
+                .and_then(Value::as_i64)
+                .map(|seq| seq.to_string())
+                .unwrap_or_default(),
+        ),
+        ("role", string_field(payload, "role").unwrap_or_default()),
+        ("type", string_field(payload, "type").unwrap_or_default()),
+        (
+            "project_id",
+            string_field(payload, "project_id").unwrap_or_default(),
+        ),
+        (
+            "entry_id",
+            string_field(payload, "entry_id").unwrap_or_default(),
+        ),
+    ])
+}
+
+fn decrypt_approval_response(
+    identity: &AgentIdentity,
+    value: Value,
+) -> Result<ApprovalResponseInbound> {
+    let encrypted: EncryptedMobilePayload = serde_json::from_value(value)?;
+    let aad = crypto::payload_aad(&[
+        ("kind", "approval_response".to_string()),
+        ("device_id", encrypted.device_id.clone()),
+        ("agent_id", identity.agent_id.clone()),
+    ]);
+    let plaintext =
+        decrypt_from_mobile(identity, &encrypted.device_id, &encrypted.ciphertext, &aad)?;
+    Ok(serde_json::from_slice(&plaintext)?)
+}
+
+fn decrypt_user_input_response(
+    identity: &AgentIdentity,
+    value: Value,
+) -> Result<UserInputResponseInbound> {
+    let encrypted: EncryptedMobilePayload = serde_json::from_value(value)?;
+    let aad = crypto::payload_aad(&[
+        ("kind", "user_input_response".to_string()),
+        ("device_id", encrypted.device_id.clone()),
+        ("agent_id", identity.agent_id.clone()),
+    ]);
+    let plaintext =
+        decrypt_from_mobile(identity, &encrypted.device_id, &encrypted.ciphertext, &aad)?;
+    Ok(serde_json::from_slice(&plaintext)?)
+}
+
+async fn track_wire_message(
+    message: &serde_json::Value,
+    active_threads: Arc<RwLock<HashMap<String, ActiveThread>>>,
+) {
+    if message.get("kind").and_then(|kind| kind.as_str()) != Some("task_update") {
+        return;
+    }
+    let Some(thread_id) = message
+        .get("thread_id")
+        .and_then(|thread_id| thread_id.as_str())
+        .map(str::to_string)
+    else {
+        return;
+    };
+    let Some(device_id) = message
+        .get("device_id")
+        .and_then(|device_id| device_id.as_str())
+        .map(str::to_string)
+    else {
+        return;
+    };
+    let cursor = message.get("seq").and_then(|seq| seq.as_i64()).unwrap_or(0);
+    let checkpoint = message
+        .get("checkpoint")
+        .and_then(|checkpoint| checkpoint.as_str())
+        .map(str::to_string);
+    let project_id = message
+        .get("project_id")
+        .and_then(|project_id| project_id.as_str())
+        .map(str::to_string);
+    let mut active = active_threads.write().await;
+    active
+        .entry(thread_id)
+        .and_modify(|current| {
+            current.device_id = device_id.clone();
+            current.cursor = current.cursor.max(cursor);
+            current.checkpoint = checkpoint.clone().or_else(|| current.checkpoint.clone());
+            current.project_id = project_id.clone().or_else(|| current.project_id.clone());
+        })
+        .or_insert(ActiveThread {
+            device_id,
+            cursor,
+            checkpoint,
+            project_id,
+        });
+}
+
+async fn next_notification(
+    receiver: &mut Option<broadcast::Receiver<serde_json::Value>>,
+) -> Option<serde_json::Value> {
+    let receiver = receiver.as_mut()?;
+    loop {
+        match receiver.recv().await {
+            Ok(notification) => return Some(notification),
+            Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                warn!("app-server notification receiver lagged by {skipped} messages");
+                continue;
+            }
+            Err(broadcast::error::RecvError::Closed) => return None,
+        }
+    }
+}
+
+fn notification_thread_id(notification: &serde_json::Value) -> Option<String> {
+    notification
+        .get("params")
+        .and_then(|params| {
+            params
+                .get("threadId")
+                .or_else(|| params.get("thread_id"))
+                .and_then(|thread_id| thread_id.as_str())
+                .or_else(|| {
+                    params
+                        .get("thread")
+                        .and_then(|thread| thread.get("id"))
+                        .and_then(|thread_id| thread_id.as_str())
+                })
+        })
+        .or_else(|| {
+            notification
+                .get("threadId")
+                .or_else(|| notification.get("thread_id"))
+                .and_then(|thread_id| thread_id.as_str())
+        })
+        .map(str::to_string)
+}
+
+fn notification_method(notification: &serde_json::Value) -> Option<&str> {
+    notification.get("method").and_then(Value::as_str)
+}
+
+fn is_task_progress_push_trigger(notification: &serde_json::Value) -> bool {
+    matches!(notification_method(notification), Some("turn/completed"))
+}
+
+fn notification_thread_payload(notification: &serde_json::Value) -> Option<&Value> {
+    notification
+        .get("params")
+        .and_then(|params| params.get("thread"))
+}
+
+fn notification_status(notification: &serde_json::Value) -> Option<&Value> {
+    notification
+        .get("params")
+        .and_then(|params| params.get("status"))
+}
+
+fn string_field(payload: &Value, key: &str) -> Option<String> {
+    payload
+        .get(key)
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+fn number_field(payload: &Value, key: &str) -> Option<f64> {
+    payload
+        .get(key)
+        .and_then(|value| value.as_f64().or_else(|| value.as_str()?.parse().ok()))
+}
+
+async fn handle_pair_handshake(
+    identity: &AgentIdentity,
+    pairing: Arc<RwLock<PairingRuntimeState>>,
+    inbound: PairHandshakeMessage,
+) -> PairHandshakeAck {
+    match accept_pair_handshake(identity, pairing, &inbound).await {
+        Ok(handshake_hash) => signed_ack(identity, inbound, handshake_hash, "accepted", None),
+        Err(err) => PairHandshakeAck {
+            kind: "pair_handshake_ack",
+            request_id: inbound.request_id,
+            device_id: inbound.device_id,
+            agent_id: inbound.agent_id,
+            pair_token: inbound.pair_token,
+            binding_id: inbound.binding_id,
+            handshake_hash: crypto::sha256_hex(inbound.encrypted_handshake),
+            ack_status: "rejected".to_string(),
+            signature: None,
+            error: Some(err.to_string()),
+        },
+    }
+}
+
+async fn accept_pair_handshake(
+    identity: &AgentIdentity,
+    pairing: Arc<RwLock<PairingRuntimeState>>,
+    inbound: &PairHandshakeMessage,
+) -> Result<String> {
+    if inbound.agent_id != identity.agent_id {
+        anyhow::bail!("pair handshake targets a different agent")
+    }
+    let secret = pairing
+        .read()
+        .await
+        .secrets
+        .get(&inbound.pair_token)
+        .cloned()
+        .context("pair token is not active in this gateway")?;
+    if inbound.agent_pairing_public_key != secret.pairing_public_key {
+        anyhow::bail!("pairing public key mismatch")
+    }
+    let envelope: EncryptedHandshakeEnvelope =
+        serde_json::from_str(&inbound.encrypted_handshake)
+            .context("encrypted_handshake must be a JSON envelope")?;
+    let plaintext = crypto::decrypt_pairing_handshake(
+        &secret.pairing_private_key,
+        &envelope.ios_encryption_public_key,
+        &envelope.nonce,
+        &envelope.ciphertext,
+        &inbound.pair_token,
+    )?;
+    let handshake: PairHandshakePlaintext =
+        serde_json::from_slice(&plaintext).context("invalid pair handshake plaintext")?;
+    if handshake.device_id != inbound.device_id {
+        anyhow::bail!("pair handshake device mismatch")
+    }
+    crypto::decode_prefixed(&handshake.ios_encryption_public_key, crypto::X25519_PREFIX)
+        .context("invalid iOS encryption public key")?;
+    bindings::save_binding(PairedDeviceBinding {
+        binding_id: inbound.binding_id.clone(),
+        device_id: inbound.device_id.clone(),
+        agent_id: inbound.agent_id.clone(),
+        ios_encryption_public_key: handshake.ios_encryption_public_key,
+        paired_at: unix_timestamp(),
+    })?;
+    Ok(crypto::sha256_hex(&inbound.encrypted_handshake))
+}
+
+fn signed_ack(
+    identity: &AgentIdentity,
+    inbound: PairHandshakeMessage,
+    handshake_hash: String,
+    ack_status: &str,
+    error: Option<String>,
+) -> PairHandshakeAck {
+    let digest = pair_ack_digest(
+        &inbound.binding_id,
+        &inbound.device_id,
+        &inbound.agent_id,
+        &inbound.pair_token,
+        &handshake_hash,
+        ack_status,
+    );
+    let signature = crypto::sign_ed25519(&identity.signing_private_key, &digest).ok();
+    PairHandshakeAck {
+        kind: "pair_handshake_ack",
+        request_id: inbound.request_id,
+        device_id: inbound.device_id,
+        agent_id: inbound.agent_id,
+        pair_token: inbound.pair_token,
+        binding_id: inbound.binding_id,
+        handshake_hash,
+        ack_status: ack_status.to_string(),
+        signature,
+        error,
+    }
+}
+
+fn pair_ack_digest(
+    binding_id: &str,
+    device_id: &str,
+    agent_id: &str,
+    pair_token: &str,
+    handshake_hash: &str,
+    ack_status: &str,
+) -> String {
+    crypto::sha256_hex(format!(
+        "{binding_id}:{device_id}:{agent_id}:{pair_token}:{handshake_hash}:{ack_status}"
+    ))
+}
+
+fn agent_ws_url(server_url: &str, agent_id: &str, session_token: &str) -> Result<Url> {
+    let mut url = Url::parse(server_url).context("invalid niuma-server URL")?;
+    match url.scheme() {
+        "http" => url.set_scheme("ws").ok(),
+        "https" => url.set_scheme("wss").ok(),
+        _ => None,
+    }
+    .context("server URL must use http or https")?;
+    let base_path = url.path().trim_end_matches('/');
+    let websocket_path = if base_path.is_empty() {
+        "/ws/agent".to_string()
+    } else {
+        format!("{base_path}/ws/agent")
+    };
+    url.set_path(&websocket_path);
+    url.query_pairs_mut()
+        .clear()
+        .append_pair("agent_id", agent_id)
+        .append_pair("session_token", session_token);
+    Ok(url)
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::{agent_ws_url, thread_sync_completed};
+
+    #[test]
+    fn agent_ws_url_preserves_reverse_proxy_prefix() {
+        let url = agent_ws_url(
+            "https://example.invalid/niuma-server/",
+            "agent_1",
+            "session_1",
+        )
+        .expect("websocket URL should be valid");
+
+        assert_eq!(
+            url.as_str(),
+            "wss://example.invalid/niuma-server/ws/agent?agent_id=agent_1&session_token=session_1"
+        );
+    }
+
+    #[test]
+    fn agent_ws_url_accepts_reverse_proxy_prefix_without_slash() {
+        let url = agent_ws_url(
+            "https://example.invalid/niuma-server",
+            "agent_1",
+            "session_1",
+        )
+        .expect("websocket URL should be valid");
+
+        assert_eq!(
+            url.as_str(),
+            "wss://example.invalid/niuma-server/ws/agent?agent_id=agent_1&session_token=session_1"
+        );
+    }
+
+    #[test]
+    fn agent_ws_url_still_supports_root_server() {
+        let url = agent_ws_url("http://127.0.0.1:8000", "agent_1", "session_1").expect("valid URL");
+
+        assert_eq!(
+            url.as_str(),
+            "ws://127.0.0.1:8000/ws/agent?agent_id=agent_1&session_token=session_1"
+        );
+    }
+
+    #[test]
+    fn notification_completion_follows_projected_updates() {
+        let completion = thread_sync_completed(
+            "ios-device",
+            "thread-1",
+            6,
+            Some("turn:old"),
+            &[
+                json!({
+                    "kind": "task_update",
+                    "seq": 7,
+                    "checkpoint": "turn:new-user"
+                }),
+                json!({
+                    "kind": "task_update",
+                    "seq": 8,
+                    "checkpoint": "turn:new-assistant"
+                }),
+            ],
+        );
+
+        assert_eq!(
+            completion.get("kind").and_then(|value| value.as_str()),
+            Some("thread_sync_completed")
+        );
+        assert_eq!(
+            completion.get("cursor").and_then(|value| value.as_i64()),
+            Some(8)
+        );
+        assert_eq!(
+            completion
+                .get("checkpoint")
+                .and_then(|value| value.as_str()),
+            Some("turn:new-assistant")
+        );
+        assert_eq!(
+            completion
+                .get("entry_count")
+                .and_then(|value| value.as_u64()),
+            Some(2)
+        );
+    }
+}
+
+fn unix_timestamp() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64
+}
