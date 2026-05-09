@@ -9,10 +9,13 @@ use anyhow::{Context, Result};
 use regex::Regex;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::io::{BufRead, BufReader};
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::OnceLock;
 use tokio::process::Command;
+
+const MAX_UNTRACKED_RAW_DIFF_BYTES: u64 = 256 * 1024;
 
 #[derive(Debug, Clone)]
 pub struct BranchChanges {
@@ -79,7 +82,10 @@ pub fn file_change_summary_part(
 /// Compute the current project branch/worktree changes directly from Git.
 pub async fn branch_changes(cwd: &str, base_ref: Option<&str>) -> Result<BranchChanges> {
     let diff = git_diff(cwd, base_ref).await?;
-    let files = parse_git_diff(&diff);
+    let mut files = parse_git_diff(&diff);
+    for parsed in untracked_file_diffs(cwd).await? {
+        merge_file_diff(&mut files, parsed);
+    }
     let summary = summary_value(&files);
     let files_summary = files_summary_value(&files);
     let bundle = json!({
@@ -377,6 +383,113 @@ async fn git_diff(cwd: &str, base_ref: Option<&str>) -> Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
+async fn git_untracked_paths(cwd: &str) -> Result<Vec<String>> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(cwd)
+        .arg("ls-files")
+        .arg("--others")
+        .arg("--exclude-standard")
+        .arg("-z")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .await
+        .with_context(|| format!("failed to list untracked files in {cwd}"))?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "git ls-files failed in {cwd}: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(output
+        .stdout
+        .split(|byte| *byte == 0)
+        .filter(|path| !path.is_empty())
+        .map(|path| String::from_utf8_lossy(path).to_string())
+        .collect())
+}
+
+async fn untracked_file_diffs(cwd: &str) -> Result<Vec<ParsedFileDiff>> {
+    let mut files = Vec::new();
+    for path in git_untracked_paths(cwd).await? {
+        let absolute_path = Path::new(cwd).join(&path);
+        if !absolute_path.is_file() {
+            continue;
+        }
+        files.push(untracked_file_diff(path, absolute_path)?);
+    }
+    Ok(files)
+}
+
+fn untracked_file_diff(path: String, absolute_path: PathBuf) -> Result<ParsedFileDiff> {
+    let metadata = std::fs::metadata(&absolute_path)
+        .with_context(|| format!("failed to read metadata for {}", absolute_path.display()))?;
+    let additions = text_line_count(&absolute_path)?.unwrap_or(0);
+    let (raw_diff, hunks) = if metadata.len() <= MAX_UNTRACKED_RAW_DIFF_BYTES {
+        match std::fs::read(&absolute_path) {
+            Ok(bytes) if !bytes.contains(&0) => match String::from_utf8(bytes) {
+                Ok(text) => {
+                    let raw_diff = untracked_text_raw_diff(&path, &text);
+                    let (_, _, hunks) = parse_unified_diff(&raw_diff);
+                    (raw_diff, hunks)
+                }
+                Err(_) => (String::new(), Vec::new()),
+            },
+            _ => (String::new(), Vec::new()),
+        }
+    } else {
+        (String::new(), Vec::new())
+    };
+    Ok(ParsedFileDiff {
+        path,
+        old_path: None,
+        change_type: "create".to_string(),
+        additions,
+        deletions: 0,
+        raw_diff,
+        hunks,
+    })
+}
+
+fn text_line_count(path: &Path) -> Result<Option<i64>> {
+    let file = std::fs::File::open(path)
+        .with_context(|| format!("failed to open untracked file {}", path.display()))?;
+    let mut reader = BufReader::new(file);
+    let mut buffer = Vec::new();
+    let mut lines = 0;
+    loop {
+        buffer.clear();
+        let read = reader
+            .read_until(b'\n', &mut buffer)
+            .with_context(|| format!("failed to read untracked file {}", path.display()))?;
+        if read == 0 {
+            break;
+        }
+        if buffer.contains(&0) {
+            return Ok(None);
+        }
+        lines += 1;
+    }
+    Ok(Some(lines))
+}
+
+fn untracked_text_raw_diff(path: &str, text: &str) -> String {
+    let line_count = text.lines().count();
+    let mut diff = format!(
+        "diff --git a/{path} b/{path}\nnew file mode 100644\n--- /dev/null\n+++ b/{path}\n"
+    );
+    if line_count > 0 {
+        diff.push_str(&format!("@@ -0,0 +1,{line_count} @@\n"));
+        for line in text.lines() {
+            diff.push('+');
+            diff.push_str(line);
+            diff.push('\n');
+        }
+    }
+    diff
+}
+
 fn parse_git_diff(diff: &str) -> BTreeMap<String, ParsedFileDiff> {
     let mut files = BTreeMap::new();
     for section in git_diff_sections(diff) {
@@ -421,14 +534,27 @@ fn parsed_git_section(section: &str) -> Option<ParsedFileDiff> {
 }
 
 fn git_section_path(section: &str) -> Option<String> {
+    let mut old_path = None;
+    let mut deleted_file = false;
+    let mut rename_to = None;
     for line in section.lines() {
         if let Some(rest) = line.strip_prefix("+++ b/") {
             return Some(rest.to_string());
         }
+        if let Some(rest) = line.strip_prefix("--- a/") {
+            old_path = Some(rest.to_string());
+        }
+        if line == "+++ /dev/null" {
+            deleted_file = true;
+        }
+        if let Some(rest) = line.strip_prefix("rename to ") {
+            rename_to = Some(rest.to_string());
+        }
     }
-    section
-        .lines()
-        .find_map(|line| line.strip_prefix("rename to ").map(str::to_string))
+    if deleted_file {
+        return old_path;
+    }
+    rename_to
 }
 
 fn git_section_old_path(section: &str) -> Option<String> {
@@ -459,6 +585,7 @@ fn git_section_change_type(section: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::process::Command as StdCommand;
 
     #[test]
     fn parses_unified_diff_counts_and_hunk_lines() {
@@ -501,5 +628,61 @@ mod tests {
                 > 0,
             true
         );
+    }
+
+    #[test]
+    fn parses_deleted_git_file_path_and_deletions() {
+        let files = parse_git_diff(
+            "diff --git a/old.swift b/old.swift\n\
+             deleted file mode 100644\n\
+             index 1111111..0000000\n\
+             --- a/old.swift\n\
+             +++ /dev/null\n\
+             @@ -1,2 +0,0 @@\n\
+             -one\n\
+             -two\n",
+        );
+        let file = files.get("old.swift").expect("deleted file summary");
+        assert_eq!(file.change_type, "delete");
+        assert_eq!(file.additions, 0);
+        assert_eq!(file.deletions, 2);
+    }
+
+    #[tokio::test]
+    async fn branch_changes_includes_deleted_and_untracked_files() {
+        let repo = test_repo("branch-changes");
+        std::fs::create_dir_all(&repo).unwrap();
+        run_git(&repo, &["init"]);
+        run_git(&repo, &["config", "user.name", "Niuma Test"]);
+        run_git(&repo, &["config", "user.email", "niuma@example.test"]);
+        std::fs::write(repo.join("tracked.txt"), "one\ntwo\n").unwrap();
+        run_git(&repo, &["add", "tracked.txt"]);
+        run_git(&repo, &["commit", "-m", "initial"]);
+
+        std::fs::remove_file(repo.join("tracked.txt")).unwrap();
+        std::fs::write(repo.join("new.txt"), "alpha\nbeta\n").unwrap();
+
+        let changes = branch_changes(repo.to_str().unwrap(), None).await.unwrap();
+        assert_eq!(changes.summary["files"], 2);
+        assert_eq!(changes.summary["additions"], 2);
+        assert_eq!(changes.summary["deletions"], 2);
+        assert!(changes.files_summary.to_string().contains("new.txt"));
+        assert!(changes.files_summary.to_string().contains("tracked.txt"));
+
+        std::fs::remove_dir_all(repo).unwrap();
+    }
+
+    fn test_repo(label: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("niuma-{label}-{}", uuid::Uuid::new_v4()))
+    }
+
+    fn run_git(repo: &Path, args: &[&str]) {
+        let status = StdCommand::new("git")
+            .arg("-C")
+            .arg(repo)
+            .args(args)
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {:?} failed", args);
     }
 }
