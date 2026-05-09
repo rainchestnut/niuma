@@ -154,18 +154,22 @@ pub(crate) fn extract_turn_entries(turn: &Value, cwd: Option<&str>) -> Vec<Threa
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default();
-    let final_file_change_group = final_file_change_group(&items);
+    let final_file_change_summary = final_file_change_summary(&items);
     for (item_index, item) in items.iter().enumerate() {
-        if let Some((start, end, final_index)) = final_file_change_group {
-            if item_index == start {
+        if let Some(summary) = final_file_change_summary.as_ref() {
+            if item_index == summary.insert_index {
                 if let Some(part) = diff_summary::file_change_summary_part(
                     &turn_id,
-                    &final_answer_entry_id(&items[final_index], &turn_id, final_index),
-                    &items[start..end],
+                    &final_answer_entry_id(
+                        &items[summary.final_index],
+                        &turn_id,
+                        summary.final_index,
+                    ),
+                    &summary.items,
                     cwd,
                 ) {
                     entries.push(ThreadEntry {
-                        entry_id: final_file_change_entry_id(&turn_id, &items[start..end]),
+                        entry_id: final_file_change_entry_id(&turn_id, &summary.items),
                         role: "assistant".to_string(),
                         text: encode_content_parts_payload(&[part]),
                         item_type: "fileChange".to_string(),
@@ -173,7 +177,7 @@ pub(crate) fn extract_turn_entries(turn: &Value, cwd: Option<&str>) -> Vec<Threa
                     });
                 }
             }
-            if (start..end).contains(&item_index) {
+            if summary.completed_indices.contains(&item_index) {
                 continue;
             }
         }
@@ -285,20 +289,36 @@ pub(crate) fn string_field(payload: &Value, key: &str) -> Option<String> {
     payload.get(key).and_then(Value::as_str).and_then(non_empty)
 }
 
-fn final_file_change_group(items: &[Value]) -> Option<(usize, usize, usize)> {
+struct FinalFileChangeSummary {
+    final_index: usize,
+    insert_index: usize,
+    completed_indices: Vec<usize>,
+    items: Vec<Value>,
+}
+
+/// Collect all completed file changes associated with the turn's final answer.
+///
+/// Codex app-server can interleave build, test, and tool progress messages
+/// between fileChange items. Mobile should receive one final turn summary, not
+/// only the last contiguous fileChange block.
+fn final_file_change_summary(items: &[Value]) -> Option<FinalFileChangeSummary> {
     let final_index = items.iter().rposition(is_final_answer_item)?;
-    let last_change_index = items[..final_index]
+    let completed_indices = items[..final_index]
         .iter()
-        .rposition(is_completed_file_change)?;
-    let mut start = last_change_index;
-    while start > 0 && is_completed_file_change(&items[start - 1]) {
-        start -= 1;
-    }
-    let mut end = last_change_index + 1;
-    while end < final_index && is_completed_file_change(&items[end]) {
-        end += 1;
-    }
-    Some((start, end, final_index))
+        .enumerate()
+        .filter_map(|(index, item)| is_completed_file_change(item).then_some(index))
+        .collect::<Vec<_>>();
+    let insert_index = *completed_indices.last()?;
+    let items = completed_indices
+        .iter()
+        .map(|index| items[*index].clone())
+        .collect();
+    Some(FinalFileChangeSummary {
+        final_index,
+        insert_index,
+        completed_indices,
+        items,
+    })
 }
 
 fn is_final_answer_item(item: &Value) -> bool {
@@ -821,5 +841,67 @@ fn non_empty(value: &str) -> Option<String> {
         None
     } else {
         Some(trimmed.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn final_file_change_summary_merges_non_contiguous_changes() {
+        let turn = json!({
+            "id": "turn-1",
+            "items": [
+                {
+                    "id": "change-a",
+                    "type": "fileChange",
+                    "status": "completed",
+                    "changes": [{
+                        "path": "/repo/a.rs",
+                        "kind": { "type": "update" },
+                        "diff": "@@ -1 +1 @@\n-old-a\n+new-a\n"
+                    }]
+                },
+                {
+                    "id": "progress",
+                    "type": "agentMessage",
+                    "text": "running build"
+                },
+                {
+                    "id": "change-b",
+                    "type": "fileChange",
+                    "status": "completed",
+                    "changes": [{
+                        "path": "/repo/b.rs",
+                        "kind": { "type": "update" },
+                        "diff": "@@ -1 +1 @@\n-old-b\n+new-b\n"
+                    }]
+                },
+                {
+                    "id": "final",
+                    "type": "agentMessage",
+                    "phase": "final_answer",
+                    "text": "done"
+                }
+            ]
+        });
+
+        let entries = extract_turn_entries(&turn, Some("/repo"));
+        let file_summaries = entries
+            .iter()
+            .filter(|entry| entry.item_type == "fileChange")
+            .collect::<Vec<_>>();
+
+        assert_eq!(file_summaries.len(), 1);
+        assert!(file_summaries[0].entry_id.contains("change-a"));
+        assert!(file_summaries[0].entry_id.contains("change-b"));
+
+        let payload: Value = serde_json::from_str(&file_summaries[0].text).unwrap();
+        let part = &payload["content_parts"][0];
+        assert_eq!(part["type"], "file_change_summary");
+        assert_eq!(part["files"], 2);
+        assert_eq!(part["additions"], 2);
+        assert_eq!(part["deletions"], 2);
     }
 }
