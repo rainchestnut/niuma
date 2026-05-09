@@ -259,19 +259,28 @@ where
     S: Sink<Message, Error = E> + Unpin,
     E: std::error::Error + Send + Sync + 'static,
 {
-    match value.get("kind").and_then(|kind| kind.as_str()) {
-        Some("pair_handshake") => {
+    let kind = wire_kind(&value).to_string();
+    info!(
+        kind = %kind,
+        request_id = %wire_request_id(&value),
+        device_id = %wire_device_id(&value),
+        thread_id = %wire_thread_id(&value),
+        cursor = ?wire_cursor(&value),
+        entry_count = ?wire_entry_count(&value),
+        payload_bytes = value.to_string().len(),
+        "gateway_ws_in"
+    );
+    match kind.as_str() {
+        "pair_handshake" => {
             let inbound: PairHandshakeMessage = serde_json::from_value(value)?;
             let ack = handle_pair_handshake(identity, pairing, inbound).await;
-            writer
-                .send(Message::Text(serde_json::to_string(&ack)?.into()))
-                .await?;
+            send_wire_message(writer, serde_json::to_value(ack)?).await?;
         }
-        Some("metadata_refresh") => {
+        "metadata_refresh" => {
             let inbound: MetadataRefreshMessage = serde_json::from_value(value)?;
             handle_metadata_refresh(writer, codex_app_server, inbound).await?;
         }
-        Some("task_start") => {
+        "task_start" => {
             let inbound: TaskStartInbound = serde_json::from_value(value)?;
             handle_task_start(
                 writer,
@@ -283,7 +292,7 @@ where
             )
             .await?;
         }
-        Some("resume_thread") => {
+        "resume_thread" => {
             let inbound: ResumeThreadInbound = serde_json::from_value(value)?;
             handle_resume_thread(
                 writer,
@@ -295,7 +304,7 @@ where
             )
             .await?;
         }
-        Some("branch_changes_request") => {
+        "branch_changes_request" => {
             let inbound: BranchChangesRequest = serde_json::from_value(value)?;
             handle_branch_changes_request(
                 writer,
@@ -306,7 +315,7 @@ where
             )
             .await?;
         }
-        Some("thread_archive_request") => {
+        "thread_archive_request" => {
             let inbound: ThreadArchiveRequest = serde_json::from_value(value)?;
             handle_thread_archive_request(
                 writer,
@@ -316,17 +325,17 @@ where
             )
             .await?;
         }
-        Some("transfer_ready") => {
+        "transfer_ready" => {
             let inbound: TransferReady = serde_json::from_value(value)?;
             handle_transfer_ready(transfer_context.as_ref(), inbound).await?;
         }
-        Some("approval_response") => {
+        "approval_response" => {
             let inbound = decrypt_approval_response(identity, value)?;
             let response =
                 handle_approval_response(codex_app_server, pending_approvals, inbound).await?;
             send_wire_message(writer, response).await?;
         }
-        Some("user_input_response") => {
+        "user_input_response" => {
             let inbound = decrypt_user_input_response(identity, value)?;
             if let Some(sync) =
                 handle_user_input_response(codex_app_server, pending_user_inputs, inbound).await?
@@ -334,10 +343,8 @@ where
                 send_wire_message(writer, sync).await?;
             }
         }
-        Some(kind) => {
-            warn!("unsupported agent websocket message kind={kind}");
-        }
-        None => warn!("agent websocket message missing kind"),
+        _ if kind == "unknown" => warn!("agent websocket message missing kind"),
+        _ => warn!("unsupported agent websocket message kind={kind}"),
     }
     Ok(())
 }
@@ -356,7 +363,9 @@ where
 {
     let device_id = inbound.device_id.clone();
     let project_id = inbound.project_id.clone();
+    let request_id = inbound.request_id.clone();
     info!(
+        request_id = %request_id.as_deref().unwrap_or(""),
         device_id = %device_id,
         project_id = %project_id,
         thread_id = ?inbound.thread_id,
@@ -404,7 +413,13 @@ where
                 )?,
             )
             .await?;
-            warn!("task_start failed: {err:#}");
+            warn!(
+                request_id = %request_id.as_deref().unwrap_or(""),
+                device_id = %device_id,
+                project_id = %project_id,
+                thread_id = %fallback_thread_id,
+                "task_start_failed: {err:#}"
+            );
         }
     }
     Ok(())
@@ -426,10 +441,27 @@ where
     let thread_id = inbound.thread_id.clone();
     let cursor = inbound.cursor;
     let checkpoint = inbound.checkpoint.clone();
+    let request_id = inbound.request_id.clone();
+    info!(
+        request_id = %request_id.as_deref().unwrap_or(""),
+        device_id = %device_id,
+        thread_id = %thread_id,
+        cursor,
+        checkpoint_present = checkpoint.is_some(),
+        "gateway_resume_thread_start"
+    );
     let Some(app_server) = codex_app_server else {
+        warn!(
+            request_id = %request_id.as_deref().unwrap_or(""),
+            device_id = %device_id,
+            thread_id = %thread_id,
+            cursor,
+            "resume_thread_failed_app_server_unavailable"
+        );
         send_wire_message(
             writer,
             thread_sync_failed(
+                request_id.as_deref(),
                 &device_id,
                 &thread_id,
                 cursor,
@@ -459,10 +491,19 @@ where
                 transfer_context.as_ref(),
             )
             .await?;
+            info!(
+                request_id = %request_id.as_deref().unwrap_or(""),
+                device_id = %device_id,
+                thread_id = %thread_id,
+                cursor = completed_cursor,
+                entry_count,
+                "gateway_resume_thread_done"
+            );
             send_wire_message(
                 writer,
                 json!({
                     "kind": "thread_sync_completed",
+                    "request_id": request_id,
                     "device_id": device_id,
                     "thread_id": thread_id,
                     "cursor": completed_cursor,
@@ -476,6 +517,7 @@ where
             send_wire_message(
                 writer,
                 thread_sync_failed(
+                    request_id.as_deref(),
                     &device_id,
                     &thread_id,
                     cursor,
@@ -484,7 +526,13 @@ where
                 ),
             )
             .await?;
-            warn!("resume_thread failed thread_id={thread_id}: {err:#}");
+            warn!(
+                request_id = %request_id.as_deref().unwrap_or(""),
+                device_id = %device_id,
+                thread_id = %thread_id,
+                cursor,
+                "resume_thread_failed: {err:#}"
+            );
         }
     }
     Ok(())
@@ -721,6 +769,7 @@ where
     let checkpoint = active.checkpoint.clone();
     if let Some(app_server) = codex_app_server {
         let inbound = ResumeThreadInbound {
+            request_id: None,
             device_id: device_id.clone(),
             thread_id: thread_id.clone(),
             cursor,
@@ -732,6 +781,7 @@ where
         {
             Ok(messages) if !messages.is_empty() => {
                 let completion = thread_sync_completed(
+                    None,
                     &device_id,
                     &thread_id,
                     cursor,
@@ -1163,7 +1213,17 @@ where
     S: Sink<Message, Error = E> + Unpin,
     E: std::error::Error + Send + Sync + 'static,
 {
+    info!(
+        request_id = %inbound.request_id,
+        device_id = %inbound.device_id,
+        "gateway_metadata_refresh_start"
+    );
     let Some(app_server) = codex_app_server else {
+        warn!(
+            request_id = %inbound.request_id,
+            device_id = %inbound.device_id,
+            "metadata_refresh_failed_app_server_unavailable"
+        );
         send_wire_message(
             writer,
             json!({
@@ -1195,10 +1255,11 @@ where
             )
             .await?;
             info!(
-                "metadata refresh completed request_id={} projects={} threads={}",
-                inbound.request_id,
-                snapshot.projects.len(),
-                snapshot.threads.len()
+                request_id = %inbound.request_id,
+                device_id = %inbound.device_id,
+                project_count = snapshot.projects.len(),
+                thread_count = snapshot.threads.len(),
+                "gateway_metadata_refresh_done"
             );
         }
         Err(err) => {
@@ -1213,8 +1274,9 @@ where
             )
             .await?;
             warn!(
-                "metadata refresh failed request_id={}: {err:#}",
-                inbound.request_id
+                request_id = %inbound.request_id,
+                device_id = %inbound.device_id,
+                "metadata_refresh_failed: {err:#}"
             );
         }
     }
@@ -1495,6 +1557,48 @@ fn request_id_string(request_id: &Value) -> String {
         .unwrap_or_else(|| request_id.to_string())
 }
 
+fn wire_kind(payload: &Value) -> &str {
+    payload
+        .get("kind")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown")
+}
+
+fn wire_request_id(payload: &Value) -> String {
+    payload
+        .get("request_id")
+        .or_else(|| payload.get("id"))
+        .map(request_id_string)
+        .unwrap_or_default()
+}
+
+fn wire_device_id(payload: &Value) -> String {
+    payload
+        .get("device_id")
+        .or_else(|| payload.get("source_device_id"))
+        .or_else(|| payload.get("target_device_id"))
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string()
+}
+
+fn wire_thread_id(payload: &Value) -> String {
+    payload
+        .get("thread_id")
+        .or_else(|| payload.get("threadId"))
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string()
+}
+
+fn wire_cursor(payload: &Value) -> Option<i64> {
+    payload.get("cursor").and_then(Value::as_i64)
+}
+
+fn wire_entry_count(payload: &Value) -> Option<u64> {
+    payload.get("entry_count").and_then(Value::as_u64)
+}
+
 fn is_app_server_request(payload: &Value) -> bool {
     payload.get("method").is_some() && payload.get("id").is_some()
 }
@@ -1556,20 +1660,25 @@ async fn resolved_request_syncs(
 }
 
 fn thread_sync_failed(
+    request_id: Option<&str>,
     device_id: &str,
     thread_id: &str,
     cursor: i64,
     checkpoint: Option<&str>,
     error: &str,
 ) -> serde_json::Value {
-    json!({
+    let mut payload = json!({
         "kind": "thread_sync_failed",
         "device_id": device_id,
         "thread_id": thread_id,
         "cursor": cursor,
         "checkpoint": checkpoint,
         "error": error,
-    })
+    });
+    if let Some(request_id) = request_id {
+        payload["request_id"] = json!(request_id);
+    }
+    payload
 }
 
 async fn send_wire_message<S, E>(writer: &mut S, payload: serde_json::Value) -> Result<()>
@@ -1577,9 +1686,34 @@ where
     S: Sink<Message, Error = E> + Unpin,
     E: std::error::Error + Send + Sync + 'static,
 {
-    writer
-        .send(Message::Text(serde_json::to_string(&payload)?.into()))
-        .await?;
+    let text = serde_json::to_string(&payload)?;
+    info!(
+        kind = %wire_kind(&payload),
+        request_id = %wire_request_id(&payload),
+        device_id = %wire_device_id(&payload),
+        thread_id = %wire_thread_id(&payload),
+        cursor = ?wire_cursor(&payload),
+        entry_count = ?wire_entry_count(&payload),
+        payload_bytes = text.len(),
+        "gateway_ws_out_start"
+    );
+    if let Err(error) = writer.send(Message::Text(text.into())).await {
+        warn!(
+            kind = %wire_kind(&payload),
+            request_id = %wire_request_id(&payload),
+            device_id = %wire_device_id(&payload),
+            thread_id = %wire_thread_id(&payload),
+            "gateway_ws_out_failed: {error:#}"
+        );
+        return Err(error.into());
+    }
+    info!(
+        kind = %wire_kind(&payload),
+        request_id = %wire_request_id(&payload),
+        device_id = %wire_device_id(&payload),
+        thread_id = %wire_thread_id(&payload),
+        "gateway_ws_out_done"
+    );
     Ok(())
 }
 
@@ -1604,20 +1738,25 @@ where
 }
 
 fn thread_sync_completed(
+    request_id: Option<&str>,
     device_id: &str,
     thread_id: &str,
     fallback_cursor: i64,
     fallback_checkpoint: Option<&str>,
     messages: &[serde_json::Value],
 ) -> serde_json::Value {
-    json!({
+    let mut payload = json!({
         "kind": "thread_sync_completed",
         "device_id": device_id,
         "thread_id": thread_id,
         "cursor": completed_cursor(messages, fallback_cursor),
         "checkpoint": completed_checkpoint(messages, fallback_checkpoint),
         "entry_count": messages.len(),
-    })
+    });
+    if let Some(request_id) = request_id {
+        payload["request_id"] = json!(request_id);
+    }
+    payload
 }
 
 fn completed_cursor(messages: &[serde_json::Value], fallback_cursor: i64) -> i64 {
@@ -2098,6 +2237,7 @@ mod tests {
     #[test]
     fn notification_completion_follows_projected_updates() {
         let completion = thread_sync_completed(
+            None,
             "ios-device",
             "thread-1",
             6,

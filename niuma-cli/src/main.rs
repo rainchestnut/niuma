@@ -13,6 +13,7 @@ mod crypto;
 mod diff_summary;
 mod gateway;
 mod identity;
+mod logging;
 mod metadata;
 mod pairing;
 mod paths;
@@ -25,19 +26,12 @@ mod tasks;
 mod thread_status;
 mod transfers;
 
-use anyhow::Result;
 use clap::Parser;
 use cli::{Cli, Commands, ServiceCommands};
 
 #[tokio::main]
-async fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "niuma=info,tower_http=warn".into()),
-        )
-        .init();
-
+async fn main() -> anyhow::Result<()> {
+    let _log_guard = logging::init()?;
     let cli = Cli::parse();
     match cli.command {
         Commands::Gateway(args) => gateway::run(args).await,

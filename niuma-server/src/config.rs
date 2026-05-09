@@ -14,6 +14,8 @@ pub struct Settings {
     pub host: String,
     pub port: u16,
     pub log_level: String,
+    pub log_dir: PathBuf,
+    pub log_retention_days: u64,
     pub database_url: String,
     pub database_pool_size: u32,
     pub database_connect_timeout: Duration,
@@ -49,6 +51,12 @@ impl Settings {
             host: get_string(&file_values, "NIUMA_HOST", "127.0.0.1")?,
             port: get_parse(&file_values, "NIUMA_PORT", 8000)?,
             log_level: get_string(&file_values, "NIUMA_LOG_LEVEL", "info")?,
+            log_dir: PathBuf::from(get_string(&file_values, "NIUMA_LOG_DIR", "logs")?),
+            log_retention_days: get_parse(
+                &file_values,
+                "NIUMA_LOG_RETENTION_DAYS",
+                crate::logging::default_retention_days(),
+            )?,
             database_url,
             database_pool_size: get_parse(&file_values, "NIUMA_DATABASE_POOL_SIZE", 5)?,
             database_connect_timeout: Duration::from_secs_f64(get_parse(

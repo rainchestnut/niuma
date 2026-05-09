@@ -26,6 +26,8 @@ const CONVERSATION_PROJECT_ID: &str = "__conversation__";
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct TaskStartInbound {
+    #[serde(default)]
+    pub request_id: Option<String>,
     pub device_id: String,
     pub agent_id: String,
     pub project_id: String,
@@ -40,6 +42,8 @@ pub struct TaskStartInbound {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct ResumeThreadInbound {
+    #[serde(default)]
+    pub request_id: Option<String>,
     pub device_id: String,
     pub thread_id: String,
     pub cursor: i64,

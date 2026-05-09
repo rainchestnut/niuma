@@ -9,6 +9,7 @@ mod crypto;
 mod db;
 mod error;
 mod hub;
+mod logging;
 mod models;
 mod routes;
 mod transfer;
@@ -40,7 +41,7 @@ pub struct AppState {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let settings = Settings::load().context("failed to load server settings")?;
-    init_tracing(&settings);
+    let _log_guard = logging::init(&settings)?;
 
     let pool = PgPoolOptions::new()
         .max_connections(settings.database_pool_size)
@@ -77,12 +78,6 @@ fn app_router(state: AppState) -> Router {
         .layer(CorsLayer::permissive())
         .layer(TraceLayer::new_for_http())
         .with_state(state)
-}
-
-fn init_tracing(settings: &Settings) {
-    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(&settings.log_level));
-    tracing_subscriber::fmt().with_env_filter(filter).init();
 }
 
 fn spawn_cleanup_loop(state: AppState) {

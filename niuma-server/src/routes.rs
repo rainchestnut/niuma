@@ -63,7 +63,16 @@ async fn register_device(
     State(state): State<AppState>,
     Json(payload): Json<DeviceRegisterRequest>,
 ) -> Result<Json<DeviceRegisterResponse>, ApiError> {
+    tracing::info!(
+        device_id = %payload.device_id,
+        device_type = %payload.device_type,
+        "http_devices_register_in"
+    );
     db::register_device(&state.pool, &payload).await?;
+    tracing::info!(
+        device_id = %payload.device_id,
+        "http_devices_register_out"
+    );
     Ok(Json(DeviceRegisterResponse {
         registered: true,
         server_time: chrono::Utc::now().timestamp(),
@@ -74,8 +83,17 @@ async fn auth_challenge(
     State(state): State<AppState>,
     Json(payload): Json<ChallengeRequest>,
 ) -> Result<Json<ChallengeResponse>, ApiError> {
+    tracing::info!(
+        device_id = %payload.device_id,
+        "http_auth_challenge_in"
+    );
     let (challenge_id, challenge, expires_at) =
         db::issue_challenge(&state.pool, &state.settings, &payload.device_id).await?;
+    tracing::info!(
+        device_id = %payload.device_id,
+        challenge_id = %challenge_id,
+        "http_auth_challenge_out"
+    );
     Ok(Json(ChallengeResponse {
         challenge_id,
         challenge,
@@ -87,7 +105,26 @@ async fn auth_verify(
     State(state): State<AppState>,
     Json(payload): Json<VerifyRequest>,
 ) -> Result<Json<VerifyResponse>, ApiError> {
-    let token = db::verify_challenge(&state.pool, &state.settings, &payload).await?;
+    tracing::info!(
+        device_id = %payload.device_id,
+        challenge_id = %payload.challenge_id,
+        "http_auth_verify_in"
+    );
+    let token = match db::verify_challenge(&state.pool, &state.settings, &payload).await {
+        Ok(token) => token,
+        Err(error) => {
+            tracing::warn!(
+                device_id = %payload.device_id,
+                challenge_id = %payload.challenge_id,
+                "http_auth_verify_failed: {error:#}"
+            );
+            return Err(error.into());
+        }
+    };
+    tracing::info!(
+        device_id = %payload.device_id,
+        "http_auth_verify_out"
+    );
     Ok(Json(VerifyResponse {
         verified: true,
         session_token: Some(token),
@@ -99,12 +136,24 @@ async fn pair_request(
     headers: HeaderMap,
     Json(payload): Json<PairRequest>,
 ) -> Result<Json<PairRequestResponse>, ApiError> {
-    db::require_session(
+    tracing::info!(
+        agent_id = %payload.agent_id,
+        "http_pair_request_in"
+    );
+    if let Err(error) = db::require_session(
         &state.pool,
         session_token(&headers),
         payload.agent_id.as_str(),
     )
-    .await?;
+    .await
+    {
+        tracing::warn!(
+            agent_id = %payload.agent_id,
+            status = %error.status(),
+            "http_pair_request_auth_failed: {error}"
+        );
+        return Err(error);
+    }
     let (pair_token, expires_at) = db::issue_pair_token(
         &state.pool,
         &state.settings,
@@ -112,6 +161,11 @@ async fn pair_request(
         &payload.agent_pairing_public_key,
     )
     .await?;
+    tracing::info!(
+        agent_id = %payload.agent_id,
+        expires_at,
+        "http_pair_request_out"
+    );
     Ok(Json(PairRequestResponse {
         pair_token,
         expires_at,
@@ -122,10 +176,21 @@ async fn pair_confirm(
     State(state): State<AppState>,
     Json(payload): Json<PairConfirmRequest>,
 ) -> Result<Json<PairConfirmResponse>, ApiError> {
+    tracing::info!(
+        device_id = %payload.device_id,
+        agent_id = %payload.agent_id,
+        "http_pair_confirm_in"
+    );
     let binding_id = db::validate_pair_confirm(&state.pool, &state.settings, &payload).await?;
     let ack = request_agent_pair_ack(&state, &payload, &binding_id).await?;
     validate_agent_pair_ack(&state, &payload, &binding_id, &ack).await?;
     db::commit_pair_confirm(&state.pool, &payload, &binding_id).await?;
+    tracing::info!(
+        device_id = %payload.device_id,
+        agent_id = %payload.agent_id,
+        binding_id = %binding_id,
+        "http_pair_confirm_out"
+    );
     Ok(Json(PairConfirmResponse {
         binding_id,
         status: "active".to_string(),
@@ -212,6 +277,11 @@ async fn pair_revoke(
     headers: HeaderMap,
     Json(payload): Json<PairRevokeRequest>,
 ) -> Result<Json<PairRevokeResponse>, ApiError> {
+    tracing::info!(
+        device_id = %payload.device_id,
+        agent_id = %payload.agent_id,
+        "http_pair_revoke_in"
+    );
     db::require_session(
         &state.pool,
         session_token(&headers),
@@ -219,6 +289,12 @@ async fn pair_revoke(
     )
     .await?;
     let revoked = db::revoke_pairing(&state.pool, &payload.device_id, &payload.agent_id).await?;
+    tracing::info!(
+        device_id = %payload.device_id,
+        agent_id = %payload.agent_id,
+        revoked,
+        "http_pair_revoke_out"
+    );
     Ok(Json(PairRevokeResponse { revoked }))
 }
 
@@ -227,12 +303,24 @@ async fn update_push_token(
     headers: HeaderMap,
     Json(payload): Json<PushTokenUpdateRequest>,
 ) -> Result<Json<PushTokenUpdateResponse>, ApiError> {
+    tracing::info!(
+        device_id = %payload.device_id,
+        "http_push_token_update_in"
+    );
     db::require_session(&state.pool, session_token(&headers), &payload.device_id).await?;
     let updated =
         db::update_ios_push_token(&state.pool, &payload.device_id, &payload.push_token).await?;
     if !updated {
+        tracing::warn!(
+            device_id = %payload.device_id,
+            "http_push_token_update_unknown_device"
+        );
         return Err(ApiError::NotFound("unknown iOS device".to_string()));
     }
+    tracing::info!(
+        device_id = %payload.device_id,
+        "http_push_token_update_out"
+    );
     Ok(Json(PushTokenUpdateResponse { updated }))
 }
 
@@ -242,6 +330,14 @@ async fn ensure_transfer(
     Path(transfer_id): Path<String>,
     Json(payload): Json<TransferEnsureRequest>,
 ) -> Result<Json<TransferEnsureResponse>, ApiError> {
+    tracing::info!(
+        transfer_id = %transfer_id,
+        source_device_id = %payload.source_device_id,
+        target_device_id = %payload.target_device_id,
+        direction = %payload.direction,
+        encrypted_size_bytes = payload.encrypted_size_bytes,
+        "http_transfer_ensure_in"
+    );
     db::require_session(
         &state.pool,
         session_token(&headers),
@@ -271,6 +367,12 @@ async fn ensure_transfer(
     if !result.needs_upload {
         notify_transfer_ready(&state, &result.manifest).await;
     }
+    tracing::info!(
+        transfer_id = %result.manifest.transfer_id,
+        needs_upload = result.needs_upload,
+        expires_at = result.manifest.expires_at,
+        "http_transfer_ensure_out"
+    );
     Ok(Json(TransferEnsureResponse {
         transfer_id: result.manifest.transfer_id,
         expires_at: result.manifest.expires_at,
@@ -284,6 +386,11 @@ async fn upload_transfer(
     Path(transfer_id): Path<String>,
     body: Bytes,
 ) -> Result<Json<TransferUploadResponse>, ApiError> {
+    tracing::info!(
+        transfer_id = %transfer_id,
+        body_bytes = body.len(),
+        "http_transfer_upload_in"
+    );
     let manifest = state
         .transfers
         .read_manifest(&transfer_id)
@@ -302,6 +409,13 @@ async fn upload_transfer(
         .await
         .map_err(transfer_error)?;
     notify_transfer_ready(&state, &completed).await;
+    tracing::info!(
+        transfer_id = %transfer_id,
+        source_device_id = %completed.source_device_id,
+        target_device_id = %completed.target_device_id,
+        expires_at = completed.expires_at,
+        "http_transfer_upload_out"
+    );
     Ok(Json(TransferUploadResponse {
         uploaded: true,
         expires_at: completed.expires_at,
@@ -314,6 +428,11 @@ async fn download_transfer(
     Path(transfer_id): Path<String>,
     Query(query): Query<TransferDownloadQuery>,
 ) -> Result<Response, ApiError> {
+    tracing::info!(
+        transfer_id = %transfer_id,
+        device_id = %query.device_id,
+        "http_transfer_download_in"
+    );
     let manifest = state
         .transfers
         .read_manifest(&transfer_id)
@@ -331,6 +450,12 @@ async fn download_transfer(
         .read_payload(&transfer_id)
         .await
         .map_err(transfer_error)?;
+    tracing::info!(
+        transfer_id = %transfer_id,
+        device_id = %query.device_id,
+        body_bytes = body.len(),
+        "http_transfer_download_out"
+    );
     Ok((
         StatusCode::OK,
         [(header::CONTENT_TYPE, "application/octet-stream")],
@@ -345,6 +470,11 @@ async fn ack_transfer(
     Path(transfer_id): Path<String>,
     Json(payload): Json<TransferAckRequest>,
 ) -> Result<Json<TransferAckResponse>, ApiError> {
+    tracing::info!(
+        transfer_id = %transfer_id,
+        receiver_device_id = %payload.receiver_device_id,
+        "http_transfer_ack_in"
+    );
     let manifest = state
         .transfers
         .read_manifest(&transfer_id)
@@ -367,6 +497,11 @@ async fn ack_transfer(
         .ack_transfer(&transfer_id)
         .await
         .map_err(transfer_error)?;
+    tracing::info!(
+        transfer_id = %transfer_id,
+        receiver_device_id = %payload.receiver_device_id,
+        "http_transfer_ack_out"
+    );
     Ok(Json(TransferAckResponse { acknowledged: true }))
 }
 
@@ -405,15 +540,29 @@ async fn notify_transfer_ready(state: &AppState, manifest: &TransferManifest) {
         "source": "server",
     });
     if manifest.direction == "ios_to_agent" {
-        state
+        let delivered = state
             .hub
             .send_to_agent(&manifest.target_device_id, payload)
             .await;
+        tracing::info!(
+            transfer_id = %manifest.transfer_id,
+            direction = %manifest.direction,
+            target_device_id = %manifest.target_device_id,
+            delivered,
+            "transfer_ready_to_agent"
+        );
     } else {
-        state
+        let delivered = state
             .hub
             .send_to_mobile(&manifest.target_device_id, payload, None)
             .await;
+        tracing::info!(
+            transfer_id = %manifest.transfer_id,
+            direction = %manifest.direction,
+            target_device_id = %manifest.target_device_id,
+            delivered,
+            "transfer_ready_to_mobile"
+        );
     }
 }
 
@@ -456,6 +605,12 @@ async fn mobile_socket(state: AppState, query: MobileWsQuery, socket: WebSocket)
         .hub
         .connect_mobile(&query.device_id, &query.agent_id, tx.clone())
         .await;
+    tracing::info!(
+        device_id = %query.device_id,
+        agent_id = %query.agent_id,
+        connection_id = %connection_id,
+        "mobile_ws_connected"
+    );
     let writer = tokio::spawn(async move {
         while let Some(message) = rx.recv().await {
             if ws_sender.send(message).await.is_err() {
@@ -498,6 +653,12 @@ async fn mobile_socket(state: AppState, query: MobileWsQuery, socket: WebSocket)
         .hub
         .disconnect_mobile(&query.device_id, &connection_id)
         .await;
+    tracing::info!(
+        device_id = %query.device_id,
+        agent_id = %query.agent_id,
+        connection_id = %connection_id,
+        "mobile_ws_disconnected"
+    );
     writer.abort();
 }
 
@@ -514,6 +675,11 @@ async fn agent_socket(state: AppState, query: AgentWsQuery, socket: WebSocket) {
     let (mut ws_sender, mut ws_receiver) = socket.split();
     let (tx, mut rx) = mpsc::unbounded_channel::<Message>();
     let connection_id = state.hub.connect_agent(&query.agent_id, tx.clone()).await;
+    tracing::info!(
+        agent_id = %query.agent_id,
+        connection_id = %connection_id,
+        "agent_ws_connected"
+    );
     let writer = tokio::spawn(async move {
         while let Some(message) = rx.recv().await {
             if ws_sender.send(message).await.is_err() {
@@ -557,6 +723,11 @@ async fn agent_socket(state: AppState, query: AgentWsQuery, socket: WebSocket) {
         .hub
         .disconnect_agent(&query.agent_id, &connection_id)
         .await;
+    tracing::info!(
+        agent_id = %query.agent_id,
+        connection_id = %connection_id,
+        "agent_ws_disconnected"
+    );
     writer.abort();
 }
 
@@ -568,6 +739,20 @@ async fn handle_mobile_text(
 ) -> Result<(), String> {
     let mut payload = parse_json(text)?;
     let kind = payload_kind(&payload)?.to_string();
+    if payload.get("request_id").is_none() {
+        payload["request_id"] = json!(crypto::random_token(12));
+    }
+    tracing::info!(
+        kind = %kind,
+        request_id = %request_id(&payload),
+        device_id = %query.device_id,
+        agent_id = %query.agent_id,
+        thread_id = %thread_id(&payload),
+        cursor = cursor(&payload),
+        checkpoint_present = checkpoint_present(&payload),
+        payload_bytes = text.len(),
+        "ws_mobile_in"
+    );
     match kind.as_str() {
         "task_start" => {
             validate_task_start(state, &payload, &query.device_id, &query.agent_id).await?;
@@ -654,8 +839,24 @@ async fn route_thread_archive_to_agent_or_error(
     thread_id: Option<String>,
     device_id: &str,
 ) -> Result<(), String> {
+    tracing::info!(
+        kind = "thread_archive_request",
+        request_id = %request_id.as_deref().unwrap_or(""),
+        agent_id = %agent_id,
+        device_id = %device_id,
+        thread_id = %thread_id.as_deref().unwrap_or(""),
+        "ws_route_to_agent_start"
+    );
     let delivered = state.hub.send_to_agent(agent_id, payload).await;
-    tracing::info!(agent_id = %agent_id, delivered, "ws_route_to_agent");
+    tracing::info!(
+        kind = "thread_archive_request",
+        request_id = %request_id.as_deref().unwrap_or(""),
+        agent_id = %agent_id,
+        device_id = %device_id,
+        thread_id = %thread_id.as_deref().unwrap_or(""),
+        delivered,
+        "ws_route_to_agent_done"
+    );
     if !delivered {
         send_json(
             tx,
@@ -678,8 +879,26 @@ async fn route_approval_response_to_agent_or_error(
     payload: Value,
     approval_id: Option<String>,
 ) -> Result<(), String> {
+    let device_id = device_id(&payload);
+    let request_id = request_id(&payload);
+    tracing::info!(
+        kind = "approval_response",
+        request_id = %request_id,
+        agent_id = %agent_id,
+        device_id = %device_id,
+        approval_id = %approval_id.as_deref().unwrap_or(""),
+        "ws_route_to_agent_start"
+    );
     let delivered = state.hub.send_to_agent(agent_id, payload).await;
-    tracing::info!(agent_id = %agent_id, delivered, "ws_route_to_agent");
+    tracing::info!(
+        kind = "approval_response",
+        request_id = %request_id,
+        agent_id = %agent_id,
+        device_id = %device_id,
+        approval_id = %approval_id.as_deref().unwrap_or(""),
+        delivered,
+        "ws_route_to_agent_done"
+    );
     if !delivered {
         send_json(
             tx,
@@ -700,14 +919,55 @@ async fn route_to_agent_or_error(
     payload: Value,
     metadata_request_id: Option<String>,
 ) -> Result<(), String> {
+    let kind = payload_kind(&payload).unwrap_or("unknown").to_string();
+    let request_id = request_id(&payload);
+    let device_id = device_id(&payload);
+    let thread_id = thread_id(&payload);
+    let cursor = cursor(&payload);
+    let checkpoint_present = checkpoint_present(&payload);
+    tracing::info!(
+        kind = %kind,
+        request_id = %request_id,
+        agent_id = %agent_id,
+        device_id = %device_id,
+        thread_id = %thread_id,
+        cursor,
+        checkpoint_present,
+        "ws_route_to_agent_start"
+    );
     let delivered = state.hub.send_to_agent(agent_id, payload).await;
-    tracing::info!(agent_id = %agent_id, delivered, "ws_route_to_agent");
+    tracing::info!(
+        kind = %kind,
+        request_id = %request_id,
+        agent_id = %agent_id,
+        device_id = %device_id,
+        thread_id = %thread_id,
+        cursor,
+        checkpoint_present,
+        delivered,
+        "ws_route_to_agent_done"
+    );
     if !delivered && let Some(request_id) = metadata_request_id {
         send_json(
             tx,
             json!({
                 "kind": "metadata_refresh_failed",
                 "request_id": request_id,
+                "device_id": device_id,
+                "error": "desktop agent is offline",
+            }),
+        );
+    }
+    if !delivered && kind == "resume_thread" {
+        send_json(
+            tx,
+            json!({
+                "kind": "thread_sync_failed",
+                "request_id": empty_to_null(&request_id),
+                "device_id": device_id,
+                "thread_id": thread_id,
+                "cursor": cursor,
+                "checkpoint": None::<String>,
                 "error": "desktop agent is offline",
             }),
         );
@@ -750,6 +1010,17 @@ async fn handle_agent_text(
 ) -> Result<(), String> {
     let mut payload = parse_json(text)?;
     let kind = payload_kind(&payload)?.to_string();
+    tracing::info!(
+        kind = %kind,
+        request_id = %request_id(&payload),
+        agent_id = %agent_id,
+        device_id = %device_id(&payload),
+        thread_id = %thread_id(&payload),
+        cursor = cursor(&payload),
+        entry_count = entry_count(&payload),
+        payload_bytes = text.len(),
+        "ws_agent_in"
+    );
     match kind.as_str() {
         "pair_handshake_ack" => {
             state
@@ -762,10 +1033,18 @@ async fn handle_agent_text(
             payload["source"] = json!("agent");
             payload["agent_id"] = json!(agent_id);
             for device_id in state.hub.connected_mobile_ids_for_agent(agent_id).await {
-                state
+                let delivered = state
                     .hub
                     .send_to_mobile(&device_id, payload.clone(), Some(agent_id))
                     .await;
+                tracing::info!(
+                    kind = %kind,
+                    request_id = %request_id(&payload),
+                    agent_id = %agent_id,
+                    device_id = %device_id,
+                    delivered,
+                    "ws_route_to_mobile_done"
+                );
             }
             Ok(())
         }
@@ -801,8 +1080,22 @@ async fn deliver_agent_payload_to_mobile(
     mut payload: Value,
 ) -> Result<(), String> {
     let device_id = value_str_ws(&payload, "device_id")?.to_string();
+    let request_id = request_id(&payload);
+    let thread_id = thread_id(&payload);
+    let cursor = cursor(&payload);
+    let entry_count = entry_count(&payload);
     payload["source"] = json!("agent");
     payload["agent_id"] = json!(agent_id);
+    tracing::info!(
+        agent_id = %agent_id,
+        device_id = %device_id,
+        kind,
+        request_id = %request_id,
+        thread_id = %thread_id,
+        cursor,
+        entry_count,
+        "ws_route_to_mobile_start"
+    );
     let delivered = state
         .hub
         .send_to_mobile(&device_id, payload, Some(agent_id))
@@ -811,8 +1104,12 @@ async fn deliver_agent_payload_to_mobile(
         agent_id = %agent_id,
         device_id = %device_id,
         kind,
+        request_id = %request_id,
+        thread_id = %thread_id,
+        cursor,
+        entry_count,
         delivered,
-        "ws_route_to_mobile"
+        "ws_route_to_mobile_done"
     );
     // Mobile WebSocket delivery is the server->mobile channel. A missing mobile
     // connection is expected when iOS is locked or offline and must not break
@@ -879,6 +1176,7 @@ async fn close_socket(mut socket: WebSocket, code: u16, reason: &'static str) {
 }
 
 fn send_error_and_close(tx: &mpsc::UnboundedSender<Message>, error: String) {
+    tracing::warn!(error = %error, "websocket_error_close");
     send_json(tx, json!({"kind": "error", "detail": error}));
     let _ = tx.send(Message::Close(Some(CloseFrame {
         code: 4400,
@@ -888,6 +1186,14 @@ fn send_error_and_close(tx: &mpsc::UnboundedSender<Message>, error: String) {
 
 fn send_json(tx: &mpsc::UnboundedSender<Message>, payload: Value) {
     if let Ok(text) = serde_json::to_string(&payload) {
+        tracing::info!(
+            kind = %payload_kind(&payload).unwrap_or("unknown"),
+            request_id = %request_id(&payload),
+            device_id = %device_id(&payload),
+            thread_id = %thread_id(&payload),
+            payload_bytes = text.len(),
+            "ws_server_out"
+        );
         let _ = tx.send(Message::Text(text.into()));
     }
 }
@@ -898,6 +1204,57 @@ fn parse_json(text: &str) -> Result<Value, String> {
 
 fn payload_kind(payload: &Value) -> Result<&str, String> {
     value_str_ws(payload, "kind")
+}
+
+fn request_id(payload: &Value) -> String {
+    payload
+        .get("request_id")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string()
+}
+
+fn device_id(payload: &Value) -> String {
+    payload
+        .get("device_id")
+        .or_else(|| payload.get("source_device_id"))
+        .or_else(|| payload.get("target_device_id"))
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string()
+}
+
+fn thread_id(payload: &Value) -> String {
+    payload
+        .get("thread_id")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string()
+}
+
+fn cursor(payload: &Value) -> i64 {
+    payload.get("cursor").and_then(Value::as_i64).unwrap_or(0)
+}
+
+fn entry_count(payload: &Value) -> i64 {
+    payload
+        .get("entry_count")
+        .and_then(Value::as_i64)
+        .unwrap_or(0)
+}
+
+fn checkpoint_present(payload: &Value) -> bool {
+    payload
+        .get("checkpoint")
+        .is_some_and(|value| !value.is_null())
+}
+
+fn empty_to_null(value: &str) -> Value {
+    if value.is_empty() {
+        Value::Null
+    } else {
+        json!(value)
+    }
 }
 
 fn value_str<'a>(payload: &'a Value, key: &str) -> Result<&'a str, ApiError> {
@@ -973,6 +1330,8 @@ mod tests {
             host: "127.0.0.1".to_string(),
             port: 8000,
             log_level: "info".to_string(),
+            log_dir: std::env::temp_dir().join("niuma-server-logs-test"),
+            log_retention_days: crate::logging::default_retention_days(),
             database_url: "postgres://localhost/niuma_test".to_string(),
             database_pool_size: 1,
             database_connect_timeout: Duration::from_secs(1),

@@ -17,7 +17,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use tokio::sync::{Mutex, broadcast, oneshot};
 use tokio::time::{Duration, timeout};
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 use crate::paths;
 
@@ -48,6 +48,11 @@ impl CodexAppServerClient {
         let (binary, args) = command
             .split_first()
             .context("codex app-server command is empty")?;
+        info!(
+            binary = %binary,
+            arg_count = args.len(),
+            "codex_app_server_start"
+        );
         let mut child = Command::new(binary)
             .args(args)
             .stdin(Stdio::piped())
@@ -85,6 +90,7 @@ impl CodexAppServerClient {
         client.initialize().await?;
         let log_path = paths::runtime_dir()?.join("codex_app_server.initialized");
         std::fs::write(log_path, command.join(" "))?;
+        info!("codex_app_server_initialized");
         Ok(client)
     }
 
@@ -103,19 +109,64 @@ impl CodexAppServerClient {
             .await
             .insert(request_id.clone(), sender);
         let payload = json!({
-            "id": request_id,
+            "id": request_id.clone(),
             "method": method,
             "params": params,
         });
+        info!(
+            app_server_request_id = %request_id,
+            method,
+            payload_bytes = payload.to_string().len(),
+            "codex_app_server_request_out"
+        );
         if let Err(err) = self.write_json_line(&payload).await {
             self.inner.pending.lock().await.remove(&request_id);
+            warn!(
+                app_server_request_id = %request_id,
+                method,
+                "codex_app_server_request_write_failed: {err:#}"
+            );
             return Err(err);
         }
-        let response = timeout(Duration::from_secs(60), receiver)
-            .await
-            .with_context(|| format!("app-server request timed out: {method}"))?
-            .with_context(|| format!("app-server response channel closed: {method}"))?;
-        response.map_err(|message| anyhow!(message))
+        let response = match timeout(Duration::from_secs(60), receiver).await {
+            Ok(Ok(response)) => response,
+            Ok(Err(_)) => {
+                warn!(
+                    app_server_request_id = %request_id,
+                    method,
+                    "codex_app_server_response_channel_closed"
+                );
+                return Err(anyhow!("app-server response channel closed: {method}"));
+            }
+            Err(_) => {
+                self.inner.pending.lock().await.remove(&request_id);
+                warn!(
+                    app_server_request_id = %request_id,
+                    method,
+                    "codex_app_server_request_timeout"
+                );
+                return Err(anyhow!("app-server request timed out: {method}"));
+            }
+        };
+        match response {
+            Ok(response) => {
+                info!(
+                    app_server_request_id = %request_id,
+                    method,
+                    "codex_app_server_request_done"
+                );
+                Ok(response)
+            }
+            Err(message) => {
+                warn!(
+                    app_server_request_id = %request_id,
+                    method,
+                    error = %message,
+                    "codex_app_server_request_failed"
+                );
+                Err(anyhow!(message))
+            }
+        }
     }
 
     /// Send a JSON-RPC notification without waiting for a response.
@@ -124,11 +175,20 @@ impl CodexAppServerClient {
         if let Some(params) = params {
             payload["params"] = params;
         }
+        info!(
+            method,
+            payload_bytes = payload.to_string().len(),
+            "codex_app_server_notification_out"
+        );
         self.write_json_line(&payload).await
     }
 
     /// Resolve an app-server request with a successful result.
     pub async fn respond(&self, request_id: Value, result: Value) -> Result<()> {
+        info!(
+            app_server_request_id = %request_id_string(&request_id),
+            "codex_app_server_response_out"
+        );
         self.write_json_line(&json!({
             "id": request_id,
             "result": result,
@@ -138,6 +198,11 @@ impl CodexAppServerClient {
 
     /// Resolve an app-server request with a JSON-RPC error.
     pub async fn respond_error(&self, request_id: Value, code: i64, message: &str) -> Result<()> {
+        warn!(
+            app_server_request_id = %request_id_string(&request_id),
+            code,
+            "codex_app_server_error_response_out"
+        );
         self.write_json_line(&json!({
             "id": request_id,
             "error": {
@@ -340,17 +405,35 @@ fn spawn_stdout_reader(
             let payload: Value = match serde_json::from_str(&line) {
                 Ok(payload) => payload,
                 Err(err) => {
-                    warn!("invalid app-server JSON line: {err}: {line}");
+                    warn!(
+                        line_bytes = line.len(),
+                        "invalid_app_server_json_line: {err}"
+                    );
                     continue;
                 }
             };
             if let Some(response_id) = response_id(&payload) {
+                info!(
+                    app_server_request_id = %response_id,
+                    has_error = payload.get("error").is_some(),
+                    "codex_app_server_response_in"
+                );
                 if let Some(sender) = pending.lock().await.remove(&response_id) {
                     let _ = sender.send(response_payload(payload));
                     continue;
                 }
             }
-            debug!("codex app-server event: {payload}");
+            let method = payload
+                .get("method")
+                .and_then(|value| value.as_str())
+                .unwrap_or("unknown");
+            info!(
+                method = %method,
+                has_id = payload.get("id").is_some(),
+                payload_bytes = line.len(),
+                "codex_app_server_notification_in"
+            );
+            debug!("codex app-server notification received");
             let _ = notifications.send(payload);
         }
 
@@ -376,6 +459,13 @@ fn response_payload(payload: Value) -> PendingResponse {
         return Err(error.to_string());
     }
     Ok(payload.get("result").cloned().unwrap_or(Value::Null))
+}
+
+fn request_id_string(request_id: &Value) -> String {
+    request_id
+        .as_str()
+        .map(str::to_string)
+        .unwrap_or_else(|| request_id.to_string())
 }
 
 fn extract_model_ids(payload: &Value) -> Vec<String> {
