@@ -322,6 +322,7 @@ Transfer API 用于短时中转媒体和文件。当前实现用 `X-Session-Toke
 说明：
 
 - 移动端不生成 canonical message id，也不创建本地 session。消息入库、真实 thread id 与稳定 item id 由桌面 Codex / app-server 负责。
+- `thread_id` 存在时，server 只把该 ID 透传给桌面 Gateway；thread 的 projectless/workspace 归属由 Codex thread 自身决定，不能由本次 `project_id` 重绑。
 - Server 只校验签名并转发这些权限覆盖字段，不解释其语义。
 
 #### `resume_thread`
@@ -381,6 +382,18 @@ Transfer API 用于短时中转媒体和文件。当前实现用 `X-Session-Toke
 | `thread_id` | string | 是 | 所属 thread |
 | `approval_type` | string | 是 | 审批类型 |
 | `ciphertext` | string | 否 | 实时场景下的加密审批详情 |
+
+#### `approval_response_failed`
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `approval_id` | string | 是 | 审批 ID |
+| `error` | string | 是 | 审批响应无法投递或无法回写桌面 app-server 的原因 |
+
+说明：
+
+- Server 在桌面 gateway 离线时直接向当前移动端连接返回该事件。
+- Gateway 在 app-server 不可用、审批已过期或回写失败时也返回该事件；移动端不得把它视为审批完成。
 
 #### `transfer_ready`
 
@@ -456,6 +469,8 @@ APNs / Push Service 用于后台、锁屏或离线场景下提醒移动端“任
   binding，并把密文放入 APNs 自定义 payload。
 - `task_update` 过程消息不能触发 APNs。只有 Gateway 确认 Codex turn 已到达终态后，
   才能发送任务进度推送请求。
+- Server 不根据移动端 WebSocket 是否在线来抑制 APNs；是否在前台展示由 iOS 按当前
+  可见 thread 决定。
 - APNs 不是消息历史或离线队列；移动端点击通知后必须通过现有 `resume_thread` 详情
   刷新链路获取最新数据。
 

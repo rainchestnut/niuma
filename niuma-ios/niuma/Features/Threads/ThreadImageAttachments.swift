@@ -25,6 +25,8 @@ struct ExternalImageAttachmentStrip: View {
 /// Renders image attachments outside the message bubble as a compact thumbnail
 /// while keeping a comfortable tap target for opening the full-size preview.
 private struct ExternalImageAttachmentThumbnail: View {
+    @Environment(AppModel.self) private var appModel
+
     let part: ContentPart
     let localAttachment: LocalAttachmentPayload?
     let localData: Data?
@@ -48,7 +50,7 @@ private struct ExternalImageAttachmentThumbnail: View {
                 .buttonStyle(.plain)
                 .frame(width: tapTargetSize, height: tapTargetSize)
                 .contentShape(Rectangle())
-                .accessibilityHint("查看全图")
+                .accessibilityHint(L10n.string("image.preview.view_full", language: appModel.appLanguage))
                 .accessibilityIdentifier("thread-external-image-thumbnail")
             } else {
                 Image(systemName: didFail ? "photo.badge.exclamationmark" : "photo")
@@ -66,7 +68,7 @@ private struct ExternalImageAttachmentThumbnail: View {
                     .frame(width: tapTargetSize, height: tapTargetSize)
             }
         }
-        .accessibilityLabel(part.fileName ?? part.alt ?? "图片附件")
+        .accessibilityLabel(part.fileName ?? part.alt ?? L10n.string("image.attachment", language: appModel.appLanguage))
         .fullScreenCover(isPresented: $isShowingPreview) {
             FullscreenImageAttachmentPreview(
                 part: part,
@@ -119,6 +121,7 @@ private struct ExternalImageAttachmentThumbnail: View {
 
 /// Full-screen image viewer used by the detached thread attachment thumbnail.
 private struct FullscreenImageAttachmentPreview: View {
+    @Environment(AppModel.self) private var appModel
     @Environment(\.dismiss) private var dismiss
 
     let part: ContentPart
@@ -139,10 +142,13 @@ private struct FullscreenImageAttachmentPreview: View {
                         .resizable()
                         .scaledToFit()
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
-                        .accessibilityLabel(part.fileName ?? part.alt ?? "图片全图")
+                        .accessibilityLabel(part.fileName ?? part.alt ?? L10n.string("image.preview.full", language: appModel.appLanguage))
                         .accessibilityIdentifier("thread-fullscreen-image-preview")
                 } else if didFail {
-                    ContentUnavailableView("图片无法预览", systemImage: "photo.badge.exclamationmark")
+                    ContentUnavailableView(
+                        L10n.string("image.preview.unavailable", language: appModel.appLanguage),
+                        systemImage: "photo.badge.exclamationmark"
+                    )
                         .foregroundStyle(.white)
                         .accessibilityIdentifier("thread-fullscreen-image-preview")
                 } else {
@@ -163,7 +169,7 @@ private struct FullscreenImageAttachmentPreview: View {
                     .frame(width: 42, height: 42)
                     .background(.black.opacity(0.48), in: Circle())
             }
-            .accessibilityLabel("关闭图片预览")
+            .accessibilityLabel(L10n.string("image.preview.close", language: appModel.appLanguage))
             .accessibilityIdentifier("thread-fullscreen-image-close")
             .padding(.top, 18)
             .padding(.trailing, 16)
@@ -198,6 +204,8 @@ private struct FullscreenImageAttachmentPreview: View {
 }
 
 struct ContentPartView: View {
+    @Environment(AppModel.self) private var appModel
+
     let item: ContentPartRenderItem
     let localAttachment: LocalAttachmentPayload?
     let localData: Data?
@@ -216,15 +224,17 @@ struct ContentPartView: View {
             if part.isImageFile, localData != nil {
                 InlineImagePartView(
                     rawData: localData,
-                    title: part.fileName ?? part.alt ?? "图片",
-                    subtitle: attachmentSubtitle(fallback: part.mimeType ?? "image")
+                    title: part.fileName ?? part.alt ?? part.fileFallbackLabel(for: appModel.appLanguage),
+                    subtitle: attachmentSubtitle(fallback: part.mimeType ?? "image"),
+                    language: appModel.appLanguage
                 )
             } else {
+                let fallbackLabel = part.fileFallbackLabel(for: appModel.appLanguage)
                 AttachmentPartCard(
                     iconName: part.fileIconName,
-                    title: part.fileName ?? part.alt ?? part.fileFallbackLabel,
+                    title: part.fileName ?? part.alt ?? fallbackLabel,
                     subtitle: attachmentSubtitle(
-                        fallback: part.transferID.map { "transfer \($0)" } ?? (part.mimeType ?? part.fileFallbackLabel)
+                        fallback: part.transferID.map { "transfer \($0)" } ?? (part.mimeType ?? fallbackLabel)
                     )
                 )
             }
@@ -243,7 +253,7 @@ struct ContentPartView: View {
     /// Builds a short attachment status string from the unified local attachment cache.
     private func attachmentSubtitle(fallback: String) -> String {
         guard let localAttachment else { return fallback }
-        let label = localAttachment.direction == .iosToAgent ? "已发送" : "已接收"
+        let label = L10n.transferDirectionLabel(localAttachment.direction, language: appModel.appLanguage)
         if let sizeBytes = localAttachment.sizeBytes {
             return "\(label) \(ByteCountFormatter.string(fromByteCount: Int64(sizeBytes), countStyle: .file))"
         }
@@ -252,6 +262,8 @@ struct ContentPartView: View {
 }
 
 private struct FileChangeSummaryCard: View {
+    @Environment(AppModel.self) private var appModel
+
     let part: ContentPart
     let hasDetail: Bool
     let openDetail: () -> Void
@@ -267,7 +279,7 @@ private struct FileChangeSummaryCard: View {
                         .background(Circle().fill(NiumaPalette.infoSoft))
 
                     VStack(alignment: .leading, spacing: 2) {
-                        Text("\(part.files ?? 0) 个文件已更改")
+                        Text(filesChangedText(part.files ?? 0))
                             .font(.caption.weight(.semibold))
                             .foregroundStyle(NiumaPalette.ink)
                         HStack(spacing: 8) {
@@ -276,7 +288,7 @@ private struct FileChangeSummaryCard: View {
                             Text("-\(part.deletions ?? 0)")
                                 .foregroundStyle(.red)
                             if !hasDetail {
-                                Text("详情同步中")
+                                Text(L10n.string("details.syncing", language: appModel.appLanguage))
                                     .foregroundStyle(NiumaPalette.mutedInk)
                             }
                         }
@@ -306,7 +318,7 @@ private struct FileChangeSummaryCard: View {
                         }
                     }
                     if summaryRows.count > 4 {
-                        Text("还有 \(summaryRows.count - 4) 个文件")
+                        Text(moreFilesText(summaryRows.count - 4))
                             .font(.caption2)
                             .foregroundStyle(NiumaPalette.mutedInk)
                     }
@@ -325,9 +337,18 @@ private struct FileChangeSummaryCard: View {
     private var summaryRows: [FileChangeFileSummary] {
         part.filesSummary ?? []
     }
+
+    private func filesChangedText(_ count: Int) -> String {
+        L10n.string(count == 1 ? "files.changed.one" : "files.changed.other", language: appModel.appLanguage, count)
+    }
+
+    private func moreFilesText(_ count: Int) -> String {
+        L10n.string(count == 1 ? "files.more.one" : "files.more.other", language: appModel.appLanguage, count)
+    }
 }
 
 struct FileChangeDetailSheet: View {
+    @Environment(AppModel.self) private var appModel
     @Environment(\.dismiss) private var dismiss
 
     let part: ContentPart
@@ -349,7 +370,7 @@ struct FileChangeDetailSheet: View {
                             FileChangeFallbackFileRow(file: file)
                         }
                         if rawData == nil {
-                            Text("详情正在同步，稍后重试。")
+                            Text(L10n.string("details.syncing.retry", language: appModel.appLanguage))
                                 .font(.footnote)
                                 .foregroundStyle(NiumaPalette.mutedInk)
                         }
@@ -358,11 +379,11 @@ struct FileChangeDetailSheet: View {
                 .padding(16)
             }
             .niumaScreenBackground()
-            .navigationTitle("文件变更")
+            .navigationTitle(L10n.string("file_changes.title", language: appModel.appLanguage))
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
-                    Button("完成") { dismiss() }
+                    Button(L10n.string("common.done", language: appModel.appLanguage)) { dismiss() }
                 }
             }
         }
@@ -375,12 +396,14 @@ struct FileChangeDetailSheet: View {
 }
 
 private struct FileChangeSummaryHeader: View {
+    @Environment(AppModel.self) private var appModel
+
     let part: ContentPart
 
     var body: some View {
         HStack(spacing: 12) {
             VStack(alignment: .leading, spacing: 4) {
-                Text("\(part.files ?? 0) 个文件已更改")
+                Text(filesChangedText(part.files ?? 0))
                     .font(.headline)
                     .foregroundStyle(NiumaPalette.ink)
                 Text("+\(part.additions ?? 0) -\(part.deletions ?? 0)")
@@ -394,6 +417,10 @@ private struct FileChangeSummaryHeader: View {
             RoundedRectangle(cornerRadius: 16, style: .continuous)
                 .fill(NiumaPalette.raisedCard)
         )
+    }
+
+    private func filesChangedText(_ count: Int) -> String {
+        L10n.string(count == 1 ? "files.changed.one" : "files.changed.other", language: appModel.appLanguage, count)
     }
 }
 
@@ -579,6 +606,7 @@ private struct InlineImagePartView: View {
     let rawData: Data?
     let title: String
     let subtitle: String
+    let language: AppLanguage
 
     @State private var image: UIImage?
     @State private var didFail = false
@@ -598,7 +626,7 @@ private struct InlineImagePartView: View {
                 AttachmentPartCard(
                     iconName: "photo",
                     title: title,
-                    subtitle: didFail ? subtitle : "正在加载 \(subtitle)"
+                    subtitle: didFail ? subtitle : L10n.string("attachment.loading", language: language, subtitle)
                 )
             }
         }

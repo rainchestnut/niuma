@@ -13,7 +13,6 @@ use anyhow::{Context, Result, bail};
 pub struct Settings {
     pub host: String,
     pub port: u16,
-    pub app_env: String,
     pub log_level: String,
     pub database_url: String,
     pub database_pool_size: u32,
@@ -49,7 +48,6 @@ impl Settings {
         Ok(Self {
             host: get_string(&file_values, "NIUMA_HOST", "127.0.0.1")?,
             port: get_parse(&file_values, "NIUMA_PORT", 8000)?,
-            app_env: get_string(&file_values, "NIUMA_APP_ENV", "development")?,
             log_level: get_string(&file_values, "NIUMA_LOG_LEVEL", "info")?,
             database_url,
             database_pool_size: get_parse(&file_values, "NIUMA_DATABASE_POOL_SIZE", 5)?,

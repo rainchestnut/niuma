@@ -419,7 +419,7 @@ Niuma 统一投影：
 | 字段 | 方向 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- | --- |
 | `threadId` | request | string | 是 | 已有 thread ID |
-| `cwd` | request | string | 否 | 恢复时覆盖 cwd |
+| `cwd` | request | string | 否 | app-server 支持该字段，但 Niuma 恢复已有 thread 时不得传入，避免改写 Codex 桌面端的 projectless/workspace 归属提示 |
 | `approvalPolicy` | request | string | 否 | 可覆盖审批策略 |
 | `approvalsReviewer` | request | string | 否 | 可覆盖审批审查人 |
 | `sandbox` | request | string | 否 | 可覆盖 thread 级 sandbox 模式 |
@@ -549,6 +549,7 @@ Gateway 至少需要处理：
 - 解密后的任务正文应采用 `content_parts`，而不是只支持单一字符串。
 - `content_parts` 中的大文件引用必须先完成 transfer，再进入 Codex app-server 调用。
 - Gateway 将 `sandbox_mode` 映射为 `thread/start` / `thread/resume` 的 `sandbox` 字符串，以及 `turn/start` 的 `sandboxPolicy` 对象。
+- `thread_id` 存在时以 Codex thread 为唯一归属来源：Gateway 调 `thread/resume` 不传 `cwd`，也不在恢复失败时按 `project_id` 新建替代 thread。`project_id` 只用于没有 `thread_id` 的新任务创建。
 - 移动端不生成本地 session 或 canonical message id；新任务的 thread ID 与稳定消息 ID 来自 Codex app-server 的投影。
 
 ### 8.5 出站消息 `task_update`
@@ -596,6 +597,8 @@ Gateway 至少需要处理：
 
 ### 8.8 入站消息 `approval_response`
 
+外层 envelope 明文携带 `approval_id`，用于无法投递或无法回写 app-server 时把失败原因路由回移动端；审批决策正文仍保持端到端加密。
+
 | 字段 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- |
 | `approval_id` | string | 是 | 审批 ID |
@@ -603,7 +606,20 @@ Gateway 至少需要处理：
 | `grant_scope` | object | 否 | 授权范围 |
 | `grant_scope.scope` | string | 否 | `turn` 或 `session` |
 
-### 8.9 入站消息 `resume_thread`
+### 8.9 出站消息 `approval_response_failed`
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `device_id` | string | 是 | 目标移动设备 |
+| `approval_id` | string | 是 | 审批 ID |
+| `error` | string | 是 | 审批回写失败原因 |
+
+说明：
+
+- gateway 收到移动端审批响应后不直接假定成功；只有 app-server 回写成功后才发送 `approval_sync(status=resolved)`。
+- app-server 不可用、审批已不在 pending 表中或回写失败时，gateway 发送该事件并保留可重试的 pending 审批。
+
+### 8.10 入站消息 `resume_thread`
 
 | 字段 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- |

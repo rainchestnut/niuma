@@ -15,6 +15,7 @@ final class AppModel {
     var projects: [ProjectSummary] = []
     var threadsByProject: [String: [ThreadSummary]] = [:]
     var approvals: [ApprovalSummary] = []
+    var approvalResponseFailures: [String: String] = [:]
     var userInputRequests: [UserInputRequestSummary] = []
     var timelines: [String: ThreadTimeline] = [:]
     var threadRefreshStates: [String: ThreadRefreshStatus] = [:]
@@ -32,6 +33,7 @@ final class AppModel {
     var isBootstrapping = false
     var isRefreshing = false
     var isUpdatingServerBaseURL = false
+    var visibleThreadID: String?
     var appLanguage: AppLanguage
     var appTheme: AppTheme
     var serverBaseURLText: String
@@ -163,12 +165,7 @@ final class AppModel {
     }
 
     var localeIdentifier: String {
-        switch appLanguage {
-        case .chinese:
-            return "zh-Hans"
-        case .english:
-            return "en"
-        }
+        appLanguage.localeIdentifier
     }
 
     var preferredColorScheme: ColorScheme? {

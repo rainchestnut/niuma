@@ -113,39 +113,47 @@ private struct SessionRow: View {
     let onResetHistory: () -> Void
 
     var body: some View {
-        HStack(alignment: .top, spacing: 10) {
-            NavigationLink {
-                ThreadView(project: project, session: session)
-            } label: {
-                SessionRowContent(session: session)
-            }
-            .buttonStyle(.plain)
-            .accessibilityIdentifier("project-session-row")
+        ZStack(alignment: .topTrailing) {
+            HStack(alignment: .top, spacing: 10) {
+                NavigationLink {
+                    ThreadView(project: project, session: session)
+                } label: {
+                    SessionRowContent(session: session)
+                }
+                .buttonStyle(.plain)
+                .accessibilityIdentifier("project-session-row")
 
-            Button {
-                isShowingActions.toggle()
-            } label: {
-                Image(systemName: "ellipsis")
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(NiumaPalette.mutedInk)
-                    .frame(width: 28, height: 28)
-                    .background(Circle().fill(NiumaPalette.neutralSoft))
+                Button {
+                    withAnimation(.spring(response: 0.22, dampingFraction: 0.88)) {
+                        isShowingActions.toggle()
+                    }
+                } label: {
+                    Image(systemName: "ellipsis")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(isShowingActions ? NiumaPalette.ink : NiumaPalette.mutedInk)
+                        .frame(width: 30, height: 30)
+                        .background(
+                            Circle()
+                                .fill(isShowingActions ? NiumaPalette.card : NiumaPalette.neutralSoft)
+                        )
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Session 操作")
             }
-            .buttonStyle(.plain)
-            .accessibilityLabel("Session 操作")
-            .popover(
-                isPresented: $isShowingActions,
-                attachmentAnchor: .rect(.bounds),
-                arrowEdge: .trailing
-            ) {
+
+            if isShowingActions {
                 SessionActionList(
                     onResetHistory: {
-                        isShowingActions = false
+                        withAnimation(.spring(response: 0.18, dampingFraction: 0.9)) {
+                            isShowingActions = false
+                        }
                         onResetHistory()
                     }
                 )
-                .frame(width: 146)
-                .presentationCompactAdaptation(.popover)
+                .frame(width: 156)
+                .offset(x: -38, y: 38)
+                .transition(.opacity.combined(with: .scale(scale: 0.98, anchor: .topTrailing)))
+                .zIndex(1)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -156,6 +164,7 @@ private struct SessionRow: View {
                 .fill(NiumaPalette.raisedCard)
         )
         .contentShape(Rectangle())
+        .zIndex(isShowingActions ? 10 : 0)
     }
 }
 
@@ -172,7 +181,7 @@ private struct SessionRowContent: View {
                     .foregroundStyle(NiumaPalette.ink)
                     .lineLimit(2)
                 Spacer()
-                if let statusBadge = session.status.compactBadge {
+                if let statusBadge = session.status.compactBadge(for: appModel.appLanguage) {
                     StatusBadge(title: statusBadge.0, tone: statusBadge.1)
                 }
             }
@@ -180,7 +189,10 @@ private struct SessionRowContent: View {
             HStack(spacing: 8) {
                 let pendingApprovals = appModel.pendingApprovalCount(for: session.threadID)
                 if pendingApprovals > 0 {
-                    StatusBadge(title: "\(pendingApprovals) 待审批", tone: .warning)
+                    StatusBadge(
+                        title: pendingApprovalCountText(pendingApprovals),
+                        tone: .warning
+                    )
                 }
 
                 Text(DateFormatting.timeAndDate.string(from: session.updatedAt))
@@ -189,6 +201,14 @@ private struct SessionRowContent: View {
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func pendingApprovalCountText(_ count: Int) -> String {
+        L10n.string(
+            count == 1 ? "approval.pending.count.one" : "approval.pending.count.other",
+            language: appModel.appLanguage,
+            count
+        )
     }
 }
 
@@ -200,41 +220,47 @@ private struct SessionActionList: View {
             SessionActionRow(
                 title: "重置历史",
                 systemImage: "arrow.counterclockwise",
-                role: .destructive,
                 action: onResetHistory
             )
         }
-        .padding(4)
+        .padding(6)
         .background(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
                 .fill(NiumaPalette.card)
                 .overlay(
-                    RoundedRectangle(cornerRadius: 12, style: .continuous)
-                        .stroke(NiumaPalette.border, lineWidth: 1)
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        .stroke(NiumaPalette.critical.opacity(0.14), lineWidth: 1)
                 )
         )
+        .shadow(color: .black.opacity(0.08), radius: 16, x: 0, y: 10)
     }
 }
 
 private struct SessionActionRow: View {
     let title: String
     let systemImage: String
-    let role: ButtonRole?
     let action: () -> Void
 
     var body: some View {
-        Button(role: role, action: action) {
-            HStack(spacing: 8) {
+        Button(action: action) {
+            HStack(spacing: 9) {
                 Image(systemName: systemImage)
-                    .font(.system(size: 11, weight: .medium))
-                    .frame(width: 14)
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(NiumaPalette.critical)
+                    .frame(width: 24, height: 24)
+                    .background(Circle().fill(NiumaPalette.criticalSoft))
                 Text(title)
-                    .font(.system(size: 12, weight: .medium))
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(NiumaPalette.critical)
                 Spacer()
             }
-            .foregroundStyle(role == .destructive ? NiumaPalette.critical : NiumaPalette.ink)
-            .padding(.horizontal, 7)
-            .padding(.vertical, 7)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 8)
+            .frame(height: 40)
+            .background(
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .fill(NiumaPalette.criticalSoft.opacity(0.38))
+            )
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)

@@ -111,11 +111,13 @@ extension AppModel {
         projects = []
         threadsByProject = [:]
         approvals = []
+        approvalResponseFailures = [:]
         userInputRequests = []
         timelines = [:]
         threadRefreshStates = [:]
         transientOutgoingEntries = [:]
         localAttachments = [:]
+        visibleThreadID = nil
         availableModels = []
         selectedModelID = nil
         storage.set(nil, forKey: StorageKey.selectedModelID.rawValue)

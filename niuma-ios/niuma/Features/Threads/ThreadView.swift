@@ -19,6 +19,7 @@ struct ThreadView: View {
     @State private var renderedTimeline = ThreadRenderSnapshot.empty(threadID: "")
     @State private var hasScrolledAfterInitialRender = false
     @State private var shouldScrollAfterNextRender = false
+    @State private var expandedProcessGroupIDs: Set<String> = []
     @State private var selectedPhotoItem: PhotosPickerItem?
     @State private var pendingAttachments: [OutgoingAttachment] = []
     @State private var isShowingAttachmentOptions = false
@@ -49,29 +50,37 @@ struct ThreadView: View {
     }
 
     private var pendingApprovals: [ApprovalSummary] {
-        return appModel.approvals.filter { $0.threadID == thread.threadID && $0.status == .pending }
+        appModel.approvals
+            .filter { $0.threadID == thread.threadID && $0.status == .pending }
+            .sorted { $0.updatedAt < $1.updatedAt }
     }
 
     var body: some View {
         let snapshot = currentRenderSnapshot
+        let timelineRows = ThreadTimelineRow.merge(items: snapshot.items, approvals: pendingApprovals)
         ScrollViewReader { proxy in
             ScrollView {
                 VStack(alignment: .leading, spacing: 14) {
                     runtimeStrip
 
-                    if !pendingApprovals.isEmpty {
-                        approvalsStrip
-                    }
-
                     VStack(spacing: 10) {
-                        ForEach(snapshot.items) { item in
-                            switch item {
+                        ForEach(timelineRows) { row in
+                            switch row {
                             case .processGroup(let group):
-                                ProcessGroupRow(group: group)
-                                    .id(item.id)
+                                ProcessGroupRow(
+                                    group: group,
+                                    isExpanded: expandedProcessGroupIDs.contains(group.id),
+                                    onToggle: {
+                                        toggleProcessGroup(group.id)
+                                    }
+                                )
+                                    .id(row.id)
                             case .message(let item):
                                 ThreadEntryRow(item: item)
-                                    .id(item.id)
+                                    .id(row.id)
+                            case .approval(let approval):
+                                ApprovalTimelineRow(approval: approval)
+                                    .id(row.id)
                             }
                         }
                     }
@@ -108,14 +117,18 @@ struct ThreadView: View {
                 selection: $selectedPhotoItem,
                 matching: .any(of: [.images, .videos])
             )
-            .confirmationDialog("添加附件", isPresented: $isShowingAttachmentOptions, titleVisibility: .visible) {
-                Button("添加图片或视频") {
+            .confirmationDialog(
+                L10n.string("attachment.add.title", language: appModel.appLanguage),
+                isPresented: $isShowingAttachmentOptions,
+                titleVisibility: .visible
+            ) {
+                Button(L10n.string("attachment.add.media", language: appModel.appLanguage)) {
                     isPickingPhotoMedia = true
                 }
-                Button("添加文件") {
+                Button(L10n.string("attachment.add.file", language: appModel.appLanguage)) {
                     isImportingFile = true
                 }
-                Button("取消", role: .cancel) {}
+                Button(L10n.string("common.cancel", language: appModel.appLanguage), role: .cancel) {}
             }
             .sheet(isPresented: $isShowingBranchChanges) {
                 BranchChangesSheet(session: session)
@@ -131,16 +144,50 @@ struct ThreadView: View {
                 await loadInitialDetailsIfNeeded()
             }
             .onAppear {
+                appModel.enterThreadDetail(thread.threadID)
                 handleRenderSnapshotChange(snapshot, using: proxy)
+            }
+            .onDisappear {
+                appModel.leaveThreadDetail(thread.threadID)
             }
             .onChange(of: snapshot.lastEntryID) { _, _ in
                 handleRenderSnapshotChange(currentRenderSnapshot, using: proxy)
             }
+            .onChange(of: pendingApprovalIDs) { _, _ in
+                scrollToBottom(using: proxy, animated: true)
+            }
             .onChange(of: scenePhase) { _, phase in
+                if phase == .active {
+                    appModel.enterThreadDetail(thread.threadID)
+                } else {
+                    appModel.leaveThreadDetail(thread.threadID)
+                }
                 guard phase == .active, hasRequestedInitialLoad else { return }
                 Task {
                     await refreshDetails()
                 }
+            }
+        }
+    }
+
+    private var pendingApprovalIDs: [String] {
+        pendingApprovals.map(\.approvalID)
+    }
+
+    private func pendingApprovalCountText(_ count: Int) -> String {
+        L10n.string(
+            count == 1 ? "approval.pending.count.one" : "approval.pending.count.other",
+            language: appModel.appLanguage,
+            count
+        )
+    }
+
+    private func toggleProcessGroup(_ id: String) {
+        withAnimation(.easeInOut(duration: 0.16)) {
+            if expandedProcessGroupIDs.contains(id) {
+                expandedProcessGroupIDs.remove(id)
+            } else {
+                expandedProcessGroupIDs.insert(id)
             }
         }
     }
@@ -175,7 +222,7 @@ struct ThreadView: View {
                         .contentShape(Circle())
                 }
                 .buttonStyle(.plain)
-                .accessibilityLabel("查看分支变更")
+                .accessibilityLabel(L10n.string("thread.branch_changes.view", language: appModel.appLanguage))
                 .accessibilityIdentifier("thread-branch-changes-button")
 
                 Button {
@@ -196,7 +243,7 @@ struct ThreadView: View {
                 }
                 .buttonStyle(.plain)
                 .disabled(refreshStatus.isRefreshing)
-                .accessibilityLabel("刷新会话")
+                .accessibilityLabel(L10n.string("thread.refresh.accessibility", language: appModel.appLanguage))
                 .accessibilityIdentifier("thread-refresh-button")
             }
             .padding(.horizontal, 18)
@@ -215,11 +262,14 @@ struct ThreadView: View {
                 if let runtimeStateBadge = runtimeBadge {
                     StatusBadge(title: runtimeStateBadge.0, tone: runtimeStateBadge.1)
                 }
-                if let sessionBadge = session.status.compactBadge {
+                if let sessionBadge = session.status.compactBadge(for: appModel.appLanguage) {
                     StatusBadge(title: sessionBadge.0, tone: sessionBadge.1)
                 }
                 if !pendingApprovals.isEmpty {
-                    StatusBadge(title: "\(pendingApprovals.count) 待审批", tone: .warning)
+                    StatusBadge(
+                        title: pendingApprovalCountText(pendingApprovals.count),
+                        tone: .warning
+                    )
                 }
             }
             if let refreshError {
@@ -230,48 +280,10 @@ struct ThreadView: View {
         }
     }
 
-    private var approvalsStrip: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("需要处理")
-                .font(.subheadline.weight(.semibold))
-                .foregroundStyle(NiumaPalette.ink)
-
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 10) {
-                    ForEach(pendingApprovals) { approval in
-                        NavigationLink {
-                            ApprovalDetailView(approval: approval)
-                        } label: {
-                            HStack(spacing: 10) {
-                                Image(systemName: "exclamationmark.bubble")
-                                    .foregroundStyle(NiumaPalette.warning)
-                                VStack(alignment: .leading, spacing: 3) {
-                                    Text("审批")
-                                        .font(.caption2.weight(.semibold))
-                                        .foregroundStyle(NiumaPalette.mutedInk)
-                                    Text(approval.requestMethod ?? approval.approvalType)
-                                        .font(.footnote.weight(.medium))
-                                        .foregroundStyle(NiumaPalette.ink)
-                                }
-                            }
-                            .padding(.horizontal, 12)
-                            .padding(.vertical, 10)
-                            .background(
-                                RoundedRectangle(cornerRadius: 18, style: .continuous)
-                                    .fill(NiumaPalette.warningSoft)
-                            )
-                        }
-                        .buttonStyle(.plain)
-                    }
-                }
-            }
-        }
-    }
-
     private var composer: some View {
         ThreadComposerBar(
             prompt: $prompt,
-            placeholder: "给“\(session.title)”发送消息",
+            placeholder: L10n.string("thread.composer.placeholder", language: appModel.appLanguage, session.title),
             attachments: pendingAttachments,
             isSending: false,
             isPromptFocused: $isPromptFocused,
@@ -363,11 +375,11 @@ struct ThreadView: View {
         case .idle, .succeeded:
             return nil
         case .refreshing:
-            return ("刷新中", .warning)
+            return (refreshStatus.phase.title(for: appModel.appLanguage), .warning)
         case .failed:
-            return ("刷新失败", .critical)
+            return (refreshStatus.phase.title(for: appModel.appLanguage), .critical)
         case .timedOut:
-            return ("刷新超时", .critical)
+            return (refreshStatus.phase.title(for: appModel.appLanguage), .critical)
         }
     }
 
@@ -382,18 +394,18 @@ struct ThreadView: View {
         case .idle, .completed:
             return nil
         case .submitting:
-            return ("提交中", .warning)
+            return (appModel.runtimeState.title(for: appModel.appLanguage), .warning)
         case .streaming:
-            return ("流式中", .positive)
+            return (appModel.runtimeState.title(for: appModel.appLanguage), .positive)
         case .waitingApproval:
-            return ("待审批", .warning)
+            return (appModel.runtimeState.title(for: appModel.appLanguage), .warning)
         case .reconnecting:
-            return ("重连中", .warning)
+            return (appModel.runtimeState.title(for: appModel.appLanguage), .warning)
         case .failed:
             if refreshStatus.phase == .failed || refreshStatus.phase == .timedOut {
                 return nil
             }
-            return ("失败", .critical)
+            return (appModel.runtimeState.title(for: appModel.appLanguage), .critical)
         }
     }
 

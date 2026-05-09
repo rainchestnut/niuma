@@ -64,38 +64,71 @@ extension AppModel {
         )
     }
 
+    func enterThreadDetail(_ threadID: String) {
+        visibleThreadID = threadID
+    }
+
+    func leaveThreadDetail(_ threadID: String) {
+        if visibleThreadID == threadID {
+            visibleThreadID = nil
+        }
+    }
+
+    func shouldPresentPushNotification(userInfo: [AnyHashable: Any]) async -> Bool {
+        guard (userInfo["kind"] as? String) == "task_progress" else {
+            return true
+        }
+        do {
+            let decoded = try decodeTaskProgressNotification(userInfo: userInfo)
+            return visibleThreadID != decoded.threadID
+        } catch {
+            logger.error("push_presentation_decode_failed error=\(error.localizedDescription, privacy: .public)")
+            return true
+        }
+    }
+
     /// Handles an APNs tap by decrypting the opaque locator and refreshing the target thread.
     func handlePushNotification(userInfo: [AnyHashable: Any]) async {
         guard (userInfo["kind"] as? String) == "task_progress",
-              let ciphertext = userInfo["ciphertext"] as? String
+              userInfo["ciphertext"] is String
         else {
             return
         }
         do {
-            let identity = try ensurePairingIdentity()
-            let agent = try agentForPush(userInfo: userInfo)
-            selectedAgentID = agent.agentID
+            let decoded = try decodeTaskProgressNotification(userInfo: userInfo)
+            selectedAgentID = decoded.agent.agentID
             persistSelection()
-            let cryptoContext = try identityService.makePayloadCryptoContext(
-                peerPublicKey: agent.agentEncryptionPublicKey,
-                bindingID: agent.bindingID
-            )
-            let plaintext = try PayloadCryptoService.decrypt(
-                envelope: ciphertext,
-                context: cryptoContext,
-                direction: .agentToIOS,
-                additionalData: LiveRealtimeEventDecoder.taskProgressPushAdditionalData(
-                    deviceID: identity.deviceID,
-                    agentID: agent.agentID
-                )
-            )
-            let payload = try JSONDecoder().decode(TaskProgressNotificationPayload.self, from: plaintext)
-            pendingPushThreadRoute = PushThreadRoute(threadID: payload.threadID)
+            pendingPushThreadRoute = PushThreadRoute(threadID: decoded.threadID)
             await refresh()
-            await refreshThreadDetails(threadID: payload.threadID)
+            await refreshThreadDetails(threadID: decoded.threadID)
         } catch {
             pendingError = error.localizedDescription
         }
+    }
+
+    private func decodeTaskProgressNotification(
+        userInfo: [AnyHashable: Any]
+    ) throws -> (threadID: String, agent: PairedAgent) {
+        guard let ciphertext = userInfo["ciphertext"] as? String else {
+            throw AppModelError.invalidPairPayload
+        }
+        let identity = try ensurePairingIdentity()
+        let agent = try agentForPush(userInfo: userInfo)
+        let cryptoContext = try identityService.makePayloadCryptoContext(
+            peerPublicKey: agent.agentEncryptionPublicKey,
+            bindingID: agent.bindingID
+        )
+        let plaintext = try PayloadCryptoService.decrypt(
+            envelope: ciphertext,
+            context: cryptoContext,
+            direction: .agentToIOS,
+            additionalData: LiveRealtimeEventDecoder.taskProgressPushAdditionalData(
+                deviceID: identity.deviceID,
+                agentID: agent.agentID
+            )
+        )
+        let payload = try JSONDecoder().decode(TaskProgressNotificationPayload.self, from: plaintext)
+        return (payload.threadID, agent)
     }
 
     private func agentForPush(userInfo: [AnyHashable: Any]) throws -> PairedAgent {

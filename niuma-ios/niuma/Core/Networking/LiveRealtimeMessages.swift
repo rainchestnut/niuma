@@ -281,10 +281,12 @@ nonisolated struct LiveApprovalRequestMessage: Decodable {
 
 nonisolated struct LiveApprovalResponseMessage: Encodable {
     let kind: String
+    let approvalID: String
     let ciphertext: String
 
     enum CodingKeys: String, CodingKey {
         case kind
+        case approvalID = "approval_id"
         case ciphertext
     }
 }
@@ -300,6 +302,16 @@ nonisolated struct LiveApprovalSyncMessage: Decodable {
         case threadID = "thread_id"
         case approvalType = "approval_type"
         case status
+    }
+}
+
+nonisolated struct LiveApprovalResponseFailedMessage: Decodable {
+    let approvalID: String
+    let error: String
+
+    enum CodingKeys: String, CodingKey {
+        case approvalID = "approval_id"
+        case error
     }
 }
 

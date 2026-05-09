@@ -252,6 +252,7 @@ final class LiveNiumaController: NiumaControlling {
         )
         let payload = LiveApprovalResponseMessage(
             kind: "approval_response",
+            approvalID: request.approvalID,
             ciphertext: ciphertext
         )
         try await sendWebSocket(payload)

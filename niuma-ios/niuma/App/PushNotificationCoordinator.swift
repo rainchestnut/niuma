@@ -35,7 +35,11 @@ final class NiumaAppDelegate: NSObject, UIApplicationDelegate, UNUserNotificatio
         willPresent notification: UNNotification,
         withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void
     ) {
-        completionHandler([])
+        let userInfo = notification.request.content.userInfo
+        Task { @MainActor in
+            let shouldPresent = await PushNotificationCoordinator.shared.shouldPresentNotification(userInfo)
+            completionHandler(shouldPresent ? [.banner, .list, .sound] : [])
+        }
     }
 
     func userNotificationCenter(
@@ -88,5 +92,12 @@ final class PushNotificationCoordinator {
             return
         }
         await appModel.handlePushNotification(userInfo: userInfo)
+    }
+
+    func shouldPresentNotification(_ userInfo: [AnyHashable: Any]) async -> Bool {
+        guard let appModel else {
+            return true
+        }
+        return await appModel.shouldPresentPushNotification(userInfo: userInfo)
     }
 }

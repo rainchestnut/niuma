@@ -27,7 +27,6 @@ niuma-server/
 
 | 变量 | 说明 |
 |------|------|
-| `NIUMA_APP_ENV` | 运行环境标记，默认 `development`。 |
 | `NIUMA_LOG_LEVEL` | 日志级别，默认 `info`。 |
 | `NIUMA_HOST` | 监听地址，默认 `127.0.0.1`。 |
 | `NIUMA_PORT` | 监听端口，默认 `8000`。 |

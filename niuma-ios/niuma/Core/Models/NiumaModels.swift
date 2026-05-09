@@ -610,6 +610,11 @@ nonisolated struct BranchChangesResult: Hashable {
     let error: String?
 }
 
+nonisolated struct ApprovalResponseFailure: Hashable {
+    let approvalID: String
+    let error: String
+}
+
 nonisolated enum RealtimeEvent: Hashable {
     case projectSync(ProjectSummary)
     case threadSync(ThreadSummary)
@@ -621,6 +626,7 @@ nonisolated enum RealtimeEvent: Hashable {
     case metadataRefreshResult(MetadataRefreshResult)
     case branchChangesResult(BranchChangesResult)
     case approvalRequest(ApprovalSummary)
+    case approvalResponseFailed(ApprovalResponseFailure)
     case userInputRequest(UserInputRequestSummary)
     case deviceStatus(agentID: String, online: Bool)
 }
@@ -632,13 +638,15 @@ nonisolated enum AppModelError: LocalizedError {
     case missingSessionToken
     case realtimeNotConnected
     case realtimeOperationStalled
-    case unsupportedApprovalFlow
     case missingProjectSelection
     case missingPrompt
     case transferChecksumMismatch
     case transferIdentifierMismatch
     case serverForgotDevice
     case serverNotConfigured
+    case missingDeviceIdentity
+    case missingAgentBinding
+    case approvalNotPending
 
     var errorDescription: String? {
         switch self {
@@ -654,8 +662,6 @@ nonisolated enum AppModelError: LocalizedError {
             return "实时通道尚未建立，无法发送任务。"
         case .realtimeOperationStalled:
             return "实时通道无响应，请稍后重试。"
-        case .unsupportedApprovalFlow:
-            return "当前服务端还未落地 approval_response，这里先保留了接口和 UI。"
         case .missingProjectSelection:
             return "请先选择一个项目。"
         case .missingPrompt:
@@ -668,6 +674,12 @@ nonisolated enum AppModelError: LocalizedError {
             return "服务器不再认识当前移动设备身份，已清理本地绑定，请重新扫描桌面二维码完成配对。"
         case .serverNotConfigured:
             return "请先手动输入 Niuma Server 地址并应用。"
+        case .missingDeviceIdentity:
+            return "本机设备身份缺失，请重新配对后再处理审批。"
+        case .missingAgentBinding:
+            return "当前没有可用的桌面绑定，无法发送审批响应。"
+        case .approvalNotPending:
+            return "该审批已不在待处理状态，请刷新会话后重试。"
         }
     }
 }

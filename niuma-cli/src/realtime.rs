@@ -113,6 +113,8 @@ struct EncryptedMobilePayload {
 
 #[derive(Debug, Deserialize)]
 struct ApprovalResponseInbound {
+    #[serde(skip)]
+    device_id: String,
     approval_id: String,
     decision: String,
     grant_scope: Option<Value>,
@@ -303,11 +305,9 @@ where
         }
         Some("approval_response") => {
             let inbound = decrypt_approval_response(identity, value)?;
-            if let Some(sync) =
-                handle_approval_response(codex_app_server, pending_approvals, inbound).await?
-            {
-                send_wire_message(writer, sync).await?;
-            }
+            let response =
+                handle_approval_response(codex_app_server, pending_approvals, inbound).await?;
+            send_wire_message(writer, response).await?;
         }
         Some("user_input_response") => {
             let inbound = decrypt_user_input_response(identity, value)?;
@@ -952,19 +952,51 @@ async fn handle_approval_response(
     codex_app_server: Option<CodexAppServerClient>,
     pending_approvals: Arc<RwLock<HashMap<String, PendingApproval>>>,
     inbound: ApprovalResponseInbound,
-) -> Result<Option<Value>> {
+) -> Result<Value> {
     let Some(app_server) = codex_app_server else {
-        return Ok(None);
+        return Ok(approval_response_failed(
+            &inbound.device_id,
+            &inbound.approval_id,
+            "desktop app-server is not connected",
+        ));
     };
     let Some(pending) = pending_approvals.write().await.remove(&inbound.approval_id) else {
-        return Ok(None);
+        return Ok(approval_response_failed(
+            &inbound.device_id,
+            &inbound.approval_id,
+            "approval request is no longer pending",
+        ));
     };
+    if let Err(error) = submit_approval_response(&app_server, &pending, &inbound).await {
+        pending_approvals
+            .write()
+            .await
+            .insert(pending.approval_id.clone(), pending.clone());
+        return Ok(approval_response_failed(
+            &inbound.device_id,
+            &inbound.approval_id,
+            &format!("approval response failed: {error:#}"),
+        ));
+    }
+    Ok(approval_sync(
+        &pending.approval_id,
+        &pending.thread_id,
+        approval_type_for_method(&pending.method).unwrap_or("unknown"),
+        "resolved",
+    ))
+}
+
+async fn submit_approval_response(
+    app_server: &CodexAppServerClient,
+    pending: &PendingApproval,
+    inbound: &ApprovalResponseInbound,
+) -> Result<()> {
     match pending.method.as_str() {
         "item/commandExecution/requestApproval" | "item/fileChange/requestApproval" => {
             app_server
                 .respond(
-                    pending.request_id,
-                    json!({ "decision": approval_decision(&inbound) }),
+                    pending.request_id.clone(),
+                    json!({ "decision": approval_decision(inbound) }),
                 )
                 .await?;
         }
@@ -972,7 +1004,7 @@ async fn handle_approval_response(
             if inbound.decision != "allow" {
                 app_server
                     .respond_error(
-                        pending.request_id,
+                        pending.request_id.clone(),
                         -32001,
                         "permission request rejected by mobile client",
                     )
@@ -980,10 +1012,10 @@ async fn handle_approval_response(
             } else {
                 app_server
                     .respond(
-                        pending.request_id,
+                        pending.request_id.clone(),
                         json!({
                             "permissions": pending.params.get("permissions").cloned().unwrap_or_else(|| json!({})),
-                            "scope": permission_grant_scope(&inbound),
+                            "scope": permission_grant_scope(inbound),
                         }),
                     )
                     .await?;
@@ -991,16 +1023,15 @@ async fn handle_approval_response(
         }
         _ => {
             app_server
-                .respond_error(pending.request_id, -32601, "unsupported approval method")
+                .respond_error(
+                    pending.request_id.clone(),
+                    -32601,
+                    "unsupported approval method",
+                )
                 .await?;
         }
     }
-    Ok(Some(approval_sync(
-        &pending.approval_id,
-        &pending.thread_id,
-        approval_type_for_method(&pending.method).unwrap_or("unknown"),
-        "resolved",
-    )))
+    Ok(())
 }
 
 async fn handle_user_input_response(
@@ -1284,6 +1315,15 @@ fn approval_sync(approval_id: &str, thread_id: &str, approval_type: &str, status
         "thread_id": thread_id,
         "approval_type": approval_type,
         "status": status,
+    })
+}
+
+fn approval_response_failed(device_id: &str, approval_id: &str, error: &str) -> Value {
+    json!({
+        "kind": "approval_response_failed",
+        "device_id": device_id,
+        "approval_id": approval_id,
+        "error": error,
     })
 }
 
@@ -1604,7 +1644,9 @@ fn decrypt_approval_response(
     ]);
     let plaintext =
         decrypt_from_mobile(identity, &encrypted.device_id, &encrypted.ciphertext, &aad)?;
-    Ok(serde_json::from_slice(&plaintext)?)
+    let mut inbound: ApprovalResponseInbound = serde_json::from_slice(&plaintext)?;
+    inbound.device_id = encrypted.device_id;
+    Ok(inbound)
 }
 
 fn decrypt_user_input_response(
@@ -1916,7 +1958,8 @@ mod tests {
     use tokio::sync::RwLock;
 
     use super::{
-        ActiveThread, agent_ws_url, claim_task_progress_push, task_progress_push_marker,
+        ActiveThread, ApprovalResponseInbound, PendingApproval, agent_ws_url,
+        claim_task_progress_push, handle_approval_response, task_progress_push_marker,
         thread_sync_completed,
     };
 
@@ -2063,6 +2106,57 @@ mod tests {
         assert!(claim_task_progress_push(active_threads.clone(), "thread-1", "turn:turn-1").await);
         assert!(!claim_task_progress_push(active_threads.clone(), "thread-1", "turn:turn-1").await);
         assert!(claim_task_progress_push(active_threads, "thread-1", "turn:turn-2").await);
+    }
+
+    #[tokio::test]
+    async fn approval_response_without_app_server_reports_failure() {
+        let response = handle_approval_response(
+            None,
+            Arc::new(RwLock::new(HashMap::new())),
+            ApprovalResponseInbound {
+                device_id: "ios-device".to_string(),
+                approval_id: "approval-1".to_string(),
+                decision: "allow".to_string(),
+                grant_scope: None,
+            },
+        )
+        .await
+        .expect("failure event is returned");
+
+        assert_eq!(response["kind"], "approval_response_failed");
+        assert_eq!(response["device_id"], "ios-device");
+        assert_eq!(response["approval_id"], "approval-1");
+        assert_eq!(response["error"], "desktop app-server is not connected");
+    }
+
+    #[tokio::test]
+    async fn approval_response_without_app_server_keeps_pending_request() {
+        let pending_approvals = Arc::new(RwLock::new(HashMap::from([(
+            "approval-1".to_string(),
+            PendingApproval {
+                approval_id: "approval-1".to_string(),
+                request_id: json!("request-1"),
+                method: "item/permissions/requestApproval".to_string(),
+                thread_id: "thread-1".to_string(),
+                params: json!({}),
+            },
+        )])));
+        let response = handle_approval_response(
+            None,
+            pending_approvals.clone(),
+            ApprovalResponseInbound {
+                device_id: "ios-device".to_string(),
+                approval_id: "approval-1".to_string(),
+                decision: "allow".to_string(),
+                grant_scope: None,
+            },
+        )
+        .await
+        .expect("failure event is returned");
+
+        assert_eq!(response["kind"], "approval_response_failed");
+        assert_eq!(response["approval_id"], "approval-1");
+        assert!(pending_approvals.read().await.contains_key("approval-1"));
     }
 }
 

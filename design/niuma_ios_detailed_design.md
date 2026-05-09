@@ -101,6 +101,7 @@
 - APNs token 注册
 - 推送到达后的唤醒处理
 - 将提醒映射到线程恢复或审批读取动作
+- 前台收到任务进度推送时，只在当前已打开的 session 详情与通知 thread 相同时抑制系统展示；其他前台页面、后台、锁屏和离线场景都应展示通知。
 
 ### 4.9 Media Transfer
 
@@ -331,6 +332,7 @@
 说明：
 
 - 移动端不生成 canonical message id，也不创建本地 session 或把本地临时发送态作为持久消息保存。
+- `thread_id` 存在时，`project_id` 只参与本次签名/加密上下文，不应被 Gateway 用来重绑 Codex 桌面端的 thread 归属。
 - 默认权限模式不发送以上三个权限覆盖字段，保持桌面 Codex 配置为准。
 
 ### 8.4 WebSocket `resume_thread`
@@ -382,6 +384,8 @@
 
 ### 8.10 WebSocket `approval_response`
 
+外层 envelope 明文携带 `approval_id`，用于 server/gateway 在离线或回写失败时返回对应审批的失败回执；审批决策正文仍在 `ciphertext` 内端到端加密。
+
 | 字段 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- |
 | `approval_id` | string | 是 | 审批 ID |
@@ -392,7 +396,19 @@
 | `grant_scope.approval_type` | string | 否 | 审批类型 |
 | `grant_scope.ttl_seconds` | integer | 否 | 授权有效期 |
 
-### 8.11 `content_parts`
+### 8.11 WebSocket `approval_response_failed`
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `approval_id` | string | 是 | 审批 ID |
+| `error` | string | 是 | server 或 gateway 返回的失败原因 |
+
+说明：
+
+- 移动端发送审批响应后先进入提交中状态，只有收到 `approval_sync(status=resolved)` 才视为处理完成。
+- 收到 `approval_response_failed` 时维持审批待处理，展示错误并允许用户重新操作。
+
+### 8.12 `content_parts`
 
 `task_start` 和 `task_update` 解密后的业务 payload 应统一使用 `content_parts`，避免移动端只支持纯文本。移动端发送中的临时展示项只存在内存 UI 层，不进入协议、不落库；Codex/app-server 回传 canonical 用户消息后，移动端按同一内容移除本地临时展示项。
 
@@ -515,6 +531,7 @@
 - 配对前不信任任意 Agent
 - APNs 仅作为提醒与唤醒信号；通知展示文案不包含明文业务内容，点击后解密密文中的
   `thread_id` 并触发现有详情刷新。
+- 前台通知展示策略必须由移动端按当前可见 thread 判断；server 不感知页面状态。
 - 审批持续授权必须带 thread 范围和 TTL
 
 ---

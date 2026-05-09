@@ -244,6 +244,13 @@ extension AppModel {
             } else {
                 approvals.insert(approval, at: 0)
             }
+            if approval.status == .resolved || approval.requestMethod != nil {
+                approvalResponseFailures[approval.approvalID] = nil
+            }
+
+        case .approvalResponseFailed(let failure):
+            approvalResponseFailures[failure.approvalID] = failure.error
+            pendingError = failure.error
 
         case .userInputRequest(let request):
             runtimeState = .waitingApproval

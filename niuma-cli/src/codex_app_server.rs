@@ -580,4 +580,12 @@ mod tests {
         assert_eq!(thread["sandbox"], "danger-full-access");
         assert_eq!(thread["cwd"], "/tmp/workspace");
     }
+
+    #[test]
+    fn thread_resume_omits_cwd_when_not_provided() {
+        let params = thread_resume_params("thread-1", None, None, None, None);
+
+        assert_eq!(params["threadId"], "thread-1");
+        assert!(params.get("cwd").is_none());
+    }
 }

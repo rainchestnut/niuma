@@ -208,6 +208,14 @@ enum LiveRealtimeEventDecoder {
                     updatedAt: .now
                 )
             )
+        case "approval_response_failed":
+            let failure = try decoder.decode(LiveApprovalResponseFailedMessage.self, from: data)
+            return .approvalResponseFailed(
+                ApprovalResponseFailure(
+                    approvalID: failure.approvalID,
+                    error: failure.error
+                )
+            )
         case "user_input_request":
             let request = try decoder.decode(LiveUserInputRequestMessage.self, from: data)
             let questions = try decodedUserInputQuestions(

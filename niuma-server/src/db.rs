@@ -32,9 +32,6 @@ pub async fn init_schema(pool: &PgPool) -> Result<(), sqlx::Error> {
     if schema_conflicts(pool).await? {
         drop_control_plane_tables(pool).await?;
     }
-    sqlx::query("DROP TABLE IF EXISTS audit_log")
-        .execute(pool)
-        .await?;
     sqlx::query(
         r#"
         CREATE TABLE IF NOT EXISTS ios_devices (
@@ -196,7 +193,6 @@ async fn drop_control_plane_tables(pool: &PgPool) -> Result<(), sqlx::Error> {
         "auth_challenges",
         "agents",
         "ios_devices",
-        "audit_log",
     ] {
         sqlx::query(&format!("DROP TABLE IF EXISTS {table} CASCADE"))
             .execute(pool)

@@ -93,6 +93,12 @@ extension ThreadRuntimeState {
     }
 }
 
+extension ThreadRefreshPhase {
+    func title(for language: AppLanguage) -> String {
+        L10n.string("refresh.phase.\(rawValue)", language: language)
+    }
+}
+
 extension ThreadStatus {
     func title(for language: AppLanguage) -> String {
         switch (self, language) {

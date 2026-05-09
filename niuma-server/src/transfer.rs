@@ -68,11 +68,11 @@ impl TransferStore {
 
         let transfer_id = transfer_id.to_ascii_lowercase();
         let mut existing_completed = false;
-        if let Ok(existing) = self.read_manifest(&transfer_id).await {
-            if existing.expires_at > now_ts() {
-                existing_completed = existing.encrypted_size_bytes == encrypted_size_bytes
-                    && self.payload_is_complete(&existing).await;
-            }
+        if let Ok(existing) = self.read_manifest(&transfer_id).await
+            && existing.expires_at > now_ts()
+        {
+            existing_completed = existing.encrypted_size_bytes == encrypted_size_bytes
+                && self.payload_is_complete(&existing).await;
         }
         let manifest = TransferManifest {
             transfer_id: transfer_id.clone(),

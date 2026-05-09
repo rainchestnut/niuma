@@ -100,7 +100,9 @@ extension AppModel {
                 realtimeTask = nil
                 connectionState = .disconnected
                 runtimeState = .idle
+                visibleThreadID = nil
                 approvals = []
+                approvalResponseFailures = [:]
                 userInputRequests = []
                 projects = []
                 threadsByProject = [:]

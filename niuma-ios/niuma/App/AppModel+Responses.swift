@@ -5,11 +5,16 @@ extension AppModel {
         _ approval: ApprovalSummary,
         decision: ApprovalDecision,
         grantScope: ApprovalGrantScope? = nil
-    ) async {
-        guard let identity, let selectedAgent else { return }
+    ) async throws {
+        guard let identity else { throw AppModelError.missingDeviceIdentity }
+        guard let selectedAgent else { throw AppModelError.missingAgentBinding }
+        guard currentApproval(approval.approvalID)?.status == .pending else {
+            throw AppModelError.approvalNotPending
+        }
         do {
             let controller = try requireController()
             _ = try await authenticate(identity: identity, agent: selectedAgent)
+            approvalResponseFailures[approval.approvalID] = nil
             try await controller.respondToApproval(
                 request: ApprovalDecisionRequestData(
                     deviceID: identity.deviceID,
@@ -21,12 +26,18 @@ extension AppModel {
                     grantScope: grantScope
                 )
             )
-            if let index = approvals.firstIndex(where: { $0.approvalID == approval.approvalID }) {
-                approvals[index].status = .resolved
-            }
         } catch {
             pendingError = error.localizedDescription
+            throw error
         }
+    }
+
+    func currentApproval(_ approvalID: String) -> ApprovalSummary? {
+        approvals.first { $0.approvalID == approvalID }
+    }
+
+    func approvalFailureMessage(for approvalID: String) -> String? {
+        approvalResponseFailures[approvalID]
     }
 
     func respondToUserInput(_ request: UserInputRequestSummary, answers: [String: [String]]) async {
