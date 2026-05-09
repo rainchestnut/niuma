@@ -6,9 +6,11 @@ struct PairingView: View {
     @Environment(AppModel.self) private var appModel
     @Environment(\.dismiss) private var dismiss
     @State private var cameraStatus: AVAuthorizationStatus = AVCaptureDevice.authorizationStatus(for: .video)
-    @State private var scannedRaw: String?
+    @State private var isShowingScanner = false
+    @State private var submittedScanRaw: String?
     @State private var isPairing = false
     @State private var pairingStatusMessage: String?
+    @State private var scannerErrorMessage: String?
 
     let dismissOnSuccess: Bool
 
@@ -37,10 +39,6 @@ struct PairingView: View {
                             .overlay(NiumaPalette.border)
 
                         cameraSection
-
-                        if let scannedRaw {
-                            scanResult(raw: scannedRaw)
-                        }
 
                         #if DEBUG
                         Button(isPairing ? "连接中…" : "模拟扫码当前桌面二维码") {
@@ -72,6 +70,23 @@ struct PairingView: View {
             // Re-check status on entry so we react to permission changes that
             // happened while the user was in Settings.
             cameraStatus = AVCaptureDevice.authorizationStatus(for: .video)
+        }
+        .fullScreenCover(isPresented: $isShowingScanner) {
+            PairingScannerSheet(
+                title: appModel.localized("扫描桌面二维码", "Scan Desktop QR Code"),
+                idleMessage: appModel.localized(
+                    "将桌面 Gateway 的二维码放入取景框，识别后会自动配对。",
+                    "Place the desktop Gateway QR code in frame. Pairing starts automatically."
+                ),
+                statusMessage: pairingStatusMessage,
+                errorMessage: scannerErrorMessage,
+                isPairing: isPairing,
+                onClose: {
+                    isShowingScanner = false
+                },
+                onScan: handleScan
+            )
+            .interactiveDismissDisabled(isPairing)
         }
     }
 
@@ -116,23 +131,34 @@ struct PairingView: View {
     @ViewBuilder
     private var cameraSection: some View {
         switch cameraStatus {
-        case .authorized:
-            QRScannerView(onScan: handleScan)
-                .frame(height: 280)
-                .clipShape(RoundedRectangle(cornerRadius: 12))
-        case .notDetermined:
-            VStack(spacing: 12) {
-                Text("需要相机权限以扫描二维码。")
-                Button("授权使用相机") {
-                    Task { await requestCameraAccess() }
+        case .authorized, .notDetermined:
+            VStack(alignment: .leading, spacing: 12) {
+                Text(appModel.localized(
+                    "点击按钮打开相机，识别到桌面二维码后会自动完成配对。",
+                    "Open the camera and pairing will start as soon as the desktop QR code is recognized."
+                ))
+                .font(.footnote)
+                .foregroundStyle(NiumaPalette.mutedInk)
+                .fixedSize(horizontal: false, vertical: true)
+
+                Button {
+                    Task { await openScanner() }
+                } label: {
+                    Label(
+                        isPairing
+                            ? appModel.localized("配对中…", "Pairing…")
+                            : appModel.localized("扫码配对", "Scan to Pair"),
+                        systemImage: "qrcode.viewfinder"
+                    )
                 }
                 .buttonStyle(NiumaPrimaryButtonStyle())
-                .accessibilityIdentifier("pairing-camera-permission-button")
+                .disabled(isPairing)
+                .accessibilityIdentifier("pairing-scan-button")
             }
         case .denied, .restricted:
             VStack(spacing: 12) {
-                Text("相机权限已被拒绝。")
-                Button("打开系统设置") {
+                Text(appModel.localized("相机权限已被拒绝。", "Camera access was denied."))
+                Button(appModel.localized("打开系统设置", "Open Settings")) {
                     openSystemSettings()
                 }
                 .buttonStyle(NiumaPrimaryButtonStyle())
@@ -142,44 +168,42 @@ struct PairingView: View {
         }
     }
 
-    /// Shows the decoded QR payload before the user commits the desktop binding.
-    private func scanResult(raw: String) -> some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("识别到桌面二维码")
-                .font(.subheadline.weight(.semibold))
-                .foregroundStyle(NiumaPalette.ink)
-            Text(raw)
-                .font(.system(.footnote, design: .monospaced))
-                .foregroundStyle(NiumaPalette.mutedInk)
-                .lineLimit(3)
-                .truncationMode(.middle)
-                .padding(12)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(
-                    RoundedRectangle(cornerRadius: 14, style: .continuous)
-                        .fill(NiumaPalette.raisedCard)
-                )
-            Button(isPairing ? "配对中…" : "确认配对") {
-                Task { await confirmPair(raw: raw) }
-            }
-            .buttonStyle(NiumaPrimaryButtonStyle())
-            .disabled(isPairing)
-            .accessibilityIdentifier("pairing-confirm-button")
+    /// Opens the camera scanner, requesting camera authorization first when needed.
+    private func openScanner() async {
+        scannerErrorMessage = nil
+        pairingStatusMessage = nil
+        submittedScanRaw = nil
+        switch cameraStatus {
+        case .authorized:
+            isShowingScanner = true
+        case .notDetermined:
+            await requestCameraAccess(openScannerOnGrant: true)
+        default:
+            break
         }
     }
 
-    /// Handles Scan.
+    /// Handles a QR payload from the full-screen scanner and starts pairing immediately.
     private func handleScan(_ raw: String) {
-        // Skip duplicates so a held-up code doesn't pair-confirm twice.
-        guard scannedRaw != raw, !isPairing else { return }
-        scannedRaw = raw
+        // Skip duplicates so a held-up code doesn't pair-confirm repeatedly.
+        guard submittedScanRaw != raw, !isPairing else { return }
+        submittedScanRaw = raw
+        scannerErrorMessage = nil
+        Task { await confirmPair(raw: raw) }
     }
 
     private func confirmPair(raw: String) async {
+        guard !isPairing else { return }
         isPairing = true
         defer { isPairing = false }
         pairingStatusMessage = "正在完成桌面绑定…"
         let paired = await appModel.pairWithScannedPayload(raw)
+        if paired {
+            isShowingScanner = false
+        } else {
+            submittedScanRaw = nil
+            scannerErrorMessage = appModel.pendingError ?? "二维码无效或已过期，请重新扫描。"
+        }
         await finishPairingIfNeeded(paired: paired)
     }
 
@@ -191,10 +215,13 @@ struct PairingView: View {
         await finishPairingIfNeeded(paired: paired)
     }
 
-    /// Requests CameraAccess.
-    private func requestCameraAccess() async {
+    /// Requests camera access and optionally opens the scanner after authorization.
+    private func requestCameraAccess(openScannerOnGrant: Bool = false) async {
         let granted = await AVCaptureDevice.requestAccess(for: .video)
         cameraStatus = granted ? .authorized : .denied
+        if granted, openScannerOnGrant {
+            isShowingScanner = true
+        }
     }
 
     private func openSystemSettings() {
@@ -213,5 +240,92 @@ struct PairingView: View {
         if dismissOnSuccess {
             dismiss()
         }
+    }
+}
+
+/// Full-screen QR scanner used only while pairing; recognition triggers pairing immediately.
+private struct PairingScannerSheet: View {
+    let title: String
+    let idleMessage: String
+    let statusMessage: String?
+    let errorMessage: String?
+    let isPairing: Bool
+    let onClose: () -> Void
+    let onScan: (String) -> Void
+
+    var body: some View {
+        ZStack {
+            QRScannerView(onScan: onScan)
+                .ignoresSafeArea()
+
+            VStack(spacing: 0) {
+                header
+                Spacer()
+                statusPanel
+            }
+            .padding(.horizontal, 20)
+            .padding(.top, 18)
+            .padding(.bottom, 30)
+        }
+        .background(Color.black.ignoresSafeArea())
+    }
+
+    private var header: some View {
+        HStack(spacing: 12) {
+            Button {
+                onClose()
+            } label: {
+                Image(systemName: "xmark")
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .frame(width: 42, height: 42)
+                    .background(Circle().fill(.black.opacity(0.42)))
+            }
+            .buttonStyle(.plain)
+            .disabled(isPairing)
+            .accessibilityLabel("关闭扫码")
+            .accessibilityIdentifier("pairing-scanner-close-button")
+
+            Text(title)
+                .font(.headline.weight(.semibold))
+                .foregroundStyle(.white)
+
+            Spacer()
+        }
+    }
+
+    private var statusPanel: some View {
+        VStack(spacing: 10) {
+            if isPairing {
+                ProgressView()
+                    .tint(.white)
+            } else {
+                Image(systemName: errorMessage == nil ? "qrcode.viewfinder" : "exclamationmark.triangle")
+                    .font(.system(size: 22, weight: .semibold))
+                    .foregroundStyle(errorMessage == nil ? .white : .yellow)
+            }
+
+            Text(displayMessage)
+                .font(.footnote.weight(.medium))
+                .multilineTextAlignment(.center)
+                .foregroundStyle(.white)
+        }
+        .padding(.horizontal, 18)
+        .padding(.vertical, 16)
+        .frame(maxWidth: .infinity)
+        .background(
+            RoundedRectangle(cornerRadius: 22, style: .continuous)
+                .fill(.black.opacity(0.42))
+        )
+    }
+
+    private var displayMessage: String {
+        if let errorMessage {
+            return errorMessage
+        }
+        if let statusMessage {
+            return statusMessage
+        }
+        return idleMessage
     }
 }

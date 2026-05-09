@@ -56,6 +56,15 @@ struct DeviceIdentityService {
         )
     }
 
+    /// Deletes the local device identity and its private keys so the next pair creates a fresh device.
+    func resetIdentity() throws {
+        storage.set(nil, forKey: deviceIDKey)
+        storage.set(nil, forKey: publicKeyKey)
+        storage.set(nil, forKey: encryptionPublicKeyKey)
+        storage.set(nil, forKey: displayNameKey)
+        try secretStore.removeAll()
+    }
+
     func makeVerifyRequest(deviceID: String, challengeID: String, challenge: String) throws -> VerifyRequestData {
         let timestamp = Int(Date.now.timeIntervalSince1970)
         let nonce = UUID().uuidString.lowercased()

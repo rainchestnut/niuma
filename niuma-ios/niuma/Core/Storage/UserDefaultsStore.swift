@@ -26,6 +26,21 @@ final class UserDefaultsStore: KeyValueStore {
     }
 
     func set(_ value: String?, forKey key: String) {
-        defaults.set(value, forKey: key)
+        if let value {
+            defaults.set(value, forKey: key)
+        } else {
+            defaults.removeObject(forKey: key)
+        }
+    }
+
+    /// Removes every value stored in the app's UserDefaults domain.
+    func removeAllAppValues() {
+        guard let bundleIdentifier = Bundle.main.bundleIdentifier else {
+            for key in defaults.dictionaryRepresentation().keys {
+                defaults.removeObject(forKey: key)
+            }
+            return
+        }
+        defaults.removePersistentDomain(forName: bundleIdentifier)
     }
 }

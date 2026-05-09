@@ -2,6 +2,9 @@ import SwiftUI
 
 struct SettingsView: View {
     @Environment(AppModel.self) private var appModel
+    @Environment(\.dismiss) private var dismiss
+    @State private var isShowingResetConfirmation = false
+    @State private var isResettingAllData = false
 
     var body: some View {
         ScrollView {
@@ -69,11 +72,78 @@ struct SettingsView: View {
                     }
                 }
 
+                SurfaceCard(
+                    title: appModel.localized("数据", "Data"),
+                    subtitle: appModel.localized(
+                        "清除本机设置、缓存、设备身份和所有桌面绑定。",
+                        "Clear local settings, cache, device identity, and all desktop links."
+                    )
+                ) {
+                    resetAllDataButton
+                }
             }
             .padding()
         }
         .niumaScreenBackground()
         .navigationTitle(appModel.localized("设置", "Settings"))
+        .confirmationDialog(
+            appModel.localized("重置所有数据？", "Reset All Data?"),
+            isPresented: $isShowingResetConfirmation,
+            titleVisibility: .visible
+        ) {
+            Button(appModel.localized("重置所有数据", "Reset All Data"), role: .destructive) {
+                Task { await resetAllData() }
+            }
+            Button(appModel.localized("取消", "Cancel"), role: .cancel) {}
+        } message: {
+            Text(appModel.localized(
+                "这会删除本机所有对话缓存、偏好设置、设备身份和配对数据。完成后需要重新扫码配对。",
+                "This deletes all local chat cache, preferences, device identity, and pairing data. You will need to scan and pair again."
+            ))
+        }
+    }
+
+    private var resetAllDataButton: some View {
+        Button {
+            isShowingResetConfirmation = true
+        } label: {
+            HStack(spacing: 12) {
+                Image(systemName: "trash")
+                    .font(.system(size: 15, weight: .semibold))
+                    .frame(width: 30, height: 30)
+                    .background(Color.red.opacity(0.10), in: Circle())
+
+                Text(isResettingAllData ? appModel.localized("正在重置…", "Resetting…") : appModel.localized("重置所有数据", "Reset All Data"))
+                    .font(.body.weight(.semibold))
+
+                Spacer()
+
+                if isResettingAllData {
+                    ProgressView()
+                        .tint(.red)
+                }
+            }
+            .foregroundStyle(.red)
+            .padding(14)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(Color.red.opacity(0.07), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .stroke(Color.red.opacity(0.18), lineWidth: 1)
+            )
+        }
+        .buttonStyle(.plain)
+        .disabled(isResettingAllData)
+        .accessibilityIdentifier("settings-reset-all-data-button")
+    }
+
+    private func resetAllData() async {
+        guard !isResettingAllData else { return }
+        isResettingAllData = true
+        defer { isResettingAllData = false }
+        if await appModel.resetAllAppData() {
+            dismiss()
+        }
     }
 
     private func settingsRow(title: String, value: String, monospaced: Bool = false) -> some View {

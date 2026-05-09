@@ -98,14 +98,7 @@ extension AppModel {
 
     /// Clears stale paired state after the server database no longer contains this iOS identity.
     func resetPairingAfterServerIdentityLoss() {
-        realtimeTask?.cancel()
-        realtimeTask = nil
-        controller?.disconnectRealtime()
-        controller?.updateSessionToken(nil)
-        for task in threadRefreshTimeoutTasks.values {
-            task.cancel()
-        }
-        threadRefreshTimeoutTasks.removeAll()
+        tearDownRealtimeState()
         pairedAgents = []
         selectedAgentID = nil
         projects = []
@@ -127,8 +120,49 @@ extension AppModel {
         runtimeState = .idle
     }
 
+    /// Clears all app-owned local data, including SwiftData projections, preferences, pairing state, and identity keys.
+    @discardableResult
+    func resetAllAppData() async -> Bool {
+        pendingError = nil
+        tearDownRealtimeState()
+
+        do {
+            try identityService.resetIdentity()
+        } catch {
+            pendingError = error.localizedDescription
+            return false
+        }
+
+        await threadSyncPipeline.resetLocalThreadState()
+        dataStore.resetAll()
+        storage.removeAllAppValues()
+        resetInMemoryStateAfterFullDataClear()
+
+        do {
+            identity = try identityService.ensureIdentity(deviceName: DeviceIdentityService.defaultDeviceName)
+            await configurePushNotifications()
+            deviceState = .unpaired
+            hasBootstrapped = true
+            return true
+        } catch {
+            pendingError = error.localizedDescription
+            deviceState = .uninitialized
+            hasBootstrapped = false
+            return false
+        }
+    }
+
     /// Swaps the active transport endpoint and tears down server-scoped auth state.
     func replaceController(serverBaseURL: URL) {
+        tearDownRealtimeState()
+        self.serverBaseURL = serverBaseURL
+        controller = controllerFactory(serverBaseURL)
+        connectionState = .disconnected
+        runtimeState = .idle
+    }
+
+    /// Cancels live work that could otherwise write stale data after a reset.
+    private func tearDownRealtimeState() {
         realtimeTask?.cancel()
         realtimeTask = nil
         controller?.disconnectRealtime()
@@ -137,8 +171,44 @@ extension AppModel {
             task.cancel()
         }
         threadRefreshTimeoutTasks.removeAll()
-        self.serverBaseURL = serverBaseURL
-        controller = controllerFactory(serverBaseURL)
+    }
+
+    /// Restores observable state to the same defaults a fresh launch would derive after clearing storage.
+    private func resetInMemoryStateAfterFullDataClear() {
+        identity = nil
+        pairedAgents = []
+        selectedAgentID = nil
+        projects = []
+        threadsByProject = [:]
+        approvals = []
+        approvalResponseFailures = [:]
+        userInputRequests = []
+        timelines = [:]
+        threadRefreshStates = [:]
+        transientOutgoingEntries = [:]
+        localAttachments = [:]
+        branchChangesByThread = [:]
+        availableModels = []
+        selectedModelID = nil
+        selectedReasoningEffort = .high
+        approvalPermissionPreset = .defaultPermissions
+        customApprovalPolicy = .onRequest
+        customApprovalsReviewer = .user
+        customSandboxMode = .workspaceWrite
+        pendingError = nil
+        isBootstrapping = false
+        isRefreshing = false
+        isUpdatingServerBaseURL = false
+        visibleThreadID = nil
+        appLanguage = .chinese
+        appTheme = .system
+        pendingPushThreadRoute = nil
+        serverBaseURLValidationMessage = nil
+        let defaultServerBaseURL = Self.initialServerBaseURL(storage: storage)
+        serverBaseURL = defaultServerBaseURL
+        serverBaseURLText = defaultServerBaseURL.map(Self.displayString(forServerBaseURL:)) ?? ""
+        controller = defaultServerBaseURL.map(controllerFactory)
+        deviceState = .unpaired
         connectionState = .disconnected
         runtimeState = .idle
     }
