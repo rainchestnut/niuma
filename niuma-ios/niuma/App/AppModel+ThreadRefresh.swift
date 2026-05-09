@@ -9,20 +9,13 @@ extension AppModel {
         guard !archivingThreadIDs.contains(thread.threadID) else { return }
         archivingThreadIDs.insert(thread.threadID)
         do {
-            let controller = try requireController()
-            let sessionToken = try await authenticate(identity: identity, agent: selectedAgent)
-            controller.updateSessionToken(sessionToken)
-            await ensureRealtimeConnected(
-                deviceID: identity.deviceID,
-                agentID: selectedAgent.agentID,
-                sessionToken: sessionToken,
-                forceReconnect: connectionState != .connected
-            )
-            guard connectionState == .connected else {
-                throw AppModelError.realtimeNotConnected
-            }
             let requestID = UUID().uuidString.lowercased()
-            try await withTimeout(realtimeSendTimeout) {
+            try await sendRealtimeRequestWithRecovery(
+                identity: identity,
+                agent: selectedAgent,
+                operationLabel: "thread_archive",
+                forceReconnect: connectionState != .connected
+            ) { controller in
                 try await controller.requestThreadArchive(
                     request: ThreadArchiveRequestData(
                         requestID: requestID,
@@ -33,27 +26,22 @@ extension AppModel {
             }
         } catch {
             archivingThreadIDs.remove(thread.threadID)
-            pendingError = error.localizedDescription
+            if !isTransientRealtimeDisconnect(error) {
+                pendingError = error.localizedDescription
+            }
         }
     }
 
     func refreshBranchChanges(threadID: String, baseRef: String? = nil) async {
         guard let identity, let selectedAgent else { return }
         do {
-            let controller = try requireController()
-            let sessionToken = try await authenticate(identity: identity, agent: selectedAgent)
-            controller.updateSessionToken(sessionToken)
-            await ensureRealtimeConnected(
-                deviceID: identity.deviceID,
-                agentID: selectedAgent.agentID,
-                sessionToken: sessionToken,
-                forceReconnect: connectionState != .connected
-            )
-            guard connectionState == .connected else {
-                throw AppModelError.realtimeNotConnected
-            }
             let requestID = UUID().uuidString.lowercased()
-            try await withTimeout(realtimeSendTimeout) {
+            try await sendRealtimeRequestWithRecovery(
+                identity: identity,
+                agent: selectedAgent,
+                operationLabel: "branch_changes",
+                forceReconnect: connectionState != .connected
+            ) { controller in
                 try await controller.requestBranchChanges(
                     request: BranchChangesRequestData(
                         requestID: requestID,
@@ -64,7 +52,9 @@ extension AppModel {
                 )
             }
         } catch {
-            pendingError = error.localizedDescription
+            if !isTransientRealtimeDisconnect(error) {
+                pendingError = error.localizedDescription
+            }
         }
     }
 
@@ -139,59 +129,15 @@ extension AppModel {
         identity: LocalDeviceIdentity,
         agent: PairedAgent
     ) async throws {
-        do {
-            try await sendResumeThreadAfterConnecting(
-                thread: thread,
-                identity: identity,
-                agent: agent,
-                forceReconnect: connectionState != .connected
-            )
-        } catch {
-            guard isTransientRealtimeDisconnect(error) else {
-                throw error
-            }
-            logger.info("thread_refresh_transient_disconnect_retry thread_id=\(thread.threadID, privacy: .public)")
-            controller?.disconnectRealtime()
-            connectionState = .retrying
-            try await sendResumeThreadAfterConnecting(
-                thread: thread,
-                identity: identity,
-                agent: agent,
-                forceReconnect: true
-            )
-        }
-    }
-
-    /// Authenticates, ensures a live realtime socket, and sends one resume request.
-    func sendResumeThreadAfterConnecting(
-        thread: ThreadSummary,
-        identity: LocalDeviceIdentity,
-        agent: PairedAgent,
-        forceReconnect: Bool
-    ) async throws {
-        let controller = try requireController()
-        let sessionToken = try await authenticate(identity: identity, agent: agent)
-        controller.updateSessionToken(sessionToken)
-        await ensureRealtimeConnected(
-            deviceID: identity.deviceID,
-            agentID: agent.agentID,
-            sessionToken: sessionToken,
-            forceReconnect: forceReconnect
-        )
-        guard connectionState == .connected else {
-            logger.error("thread_refresh_not_connected thread_id=\(thread.threadID, privacy: .public) connection=\(String(describing: self.connectionState), privacy: .public)")
-            throw AppModelError.realtimeNotConnected
-        }
-        try await sendResumeThread(thread: thread)
-    }
-
-    /// Sends the current detail cursor/checkpoint to the desktop gateway.
-    func sendResumeThread(thread: ThreadSummary) async throws {
         let syncState = await threadSyncPipeline.loadThreadSyncState(threadID: thread.threadID)
         let localEntryCount = timelines[thread.threadID]?.entries.count ?? 0
         logger.info("resume_thread_send thread_id=\(thread.threadID, privacy: .public) cursor=\(syncState.cursor, privacy: .public) checkpoint_present=\((syncState.checkpoint != nil), privacy: .public) local_entries=\(localEntryCount, privacy: .public)")
-        let controller = try requireController()
-        try await withTimeout(realtimeSendTimeout) {
+        try await sendRealtimeRequestWithRecovery(
+            identity: identity,
+            agent: agent,
+            operationLabel: "resume_thread",
+            forceReconnect: connectionState != .connected
+        ) { controller in
             try await controller.resumeThread(
                 request: ResumeThreadRequestData(
                     threadID: thread.threadID,

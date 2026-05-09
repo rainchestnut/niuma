@@ -126,9 +126,83 @@ extension AppModel {
         await connectRealtime(deviceID: deviceID, agentID: agentID, sessionToken: sessionToken)
     }
 
+    /// Authenticates, ensures a realtime WebSocket, sends one request, and
+    /// retries once when iOS is resuming from a suspended socket.
+    func sendRealtimeRequestWithRecovery(
+        identity: LocalDeviceIdentity,
+        agent: PairedAgent,
+        operationLabel: String,
+        forceReconnect: Bool,
+        afterAuthentication: ((_ controller: any NiumaControlling, _ sessionToken: String) async throws -> Void)? = nil,
+        request: @escaping (_ controller: any NiumaControlling) async throws -> Void
+    ) async throws {
+        do {
+            try await sendRealtimeRequest(
+                identity: identity,
+                agent: agent,
+                operationLabel: operationLabel,
+                forceReconnect: forceReconnect,
+                afterAuthentication: afterAuthentication,
+                request: request
+            )
+        } catch {
+            guard isTransientRealtimeDisconnect(error) else {
+                throw error
+            }
+            logger.info("realtime_request_transient_disconnect_retry operation=\(operationLabel, privacy: .public)")
+            controller?.disconnectRealtime()
+            connectionState = .retrying
+            try await sendRealtimeRequest(
+                identity: identity,
+                agent: agent,
+                operationLabel: operationLabel,
+                forceReconnect: true,
+                afterAuthentication: afterAuthentication,
+                request: request
+            )
+        }
+    }
+
+    /// Performs one authenticated realtime send after the caller has chosen
+    /// whether to reuse or rebuild the current WebSocket.
+    func sendRealtimeRequest(
+        identity: LocalDeviceIdentity,
+        agent: PairedAgent,
+        operationLabel: String,
+        forceReconnect: Bool,
+        afterAuthentication: ((_ controller: any NiumaControlling, _ sessionToken: String) async throws -> Void)?,
+        request: @escaping (_ controller: any NiumaControlling) async throws -> Void
+    ) async throws {
+        let controller = try requireController()
+        let sessionToken = try await authenticate(identity: identity, agent: agent)
+        controller.updateSessionToken(sessionToken)
+        try await afterAuthentication?(controller, sessionToken)
+        await ensureRealtimeConnected(
+            deviceID: identity.deviceID,
+            agentID: agent.agentID,
+            sessionToken: sessionToken,
+            forceReconnect: forceReconnect
+        )
+        guard connectionState == .connected else {
+            logger.error("realtime_request_not_connected operation=\(operationLabel, privacy: .public) connection=\(String(describing: self.connectionState), privacy: .public)")
+            throw AppModelError.realtimeNotConnected
+        }
+        try await withTimeout(realtimeSendTimeout) {
+            try await request(controller)
+        }
+    }
+
     /// Background suspension and simulator app switching should degrade the
     /// badge state without presenting a blocking error dialog to the user.
     func isTransientRealtimeDisconnect(_ error: Error) -> Bool {
+        if let appError = error as? AppModelError {
+            switch appError {
+            case .realtimeOperationStalled:
+                return true
+            default:
+                break
+            }
+        }
         let nsError = error as NSError
         if nsError.domain == NSURLErrorDomain {
             switch URLError.Code(rawValue: nsError.code) {

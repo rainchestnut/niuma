@@ -220,22 +220,16 @@ final class AppModel {
         defer { isRefreshing = false }
 
         do {
-            let controller = try requireController()
-            let sessionToken = try await authenticate(identity: identity, agent: selectedAgent)
-            controller.updateSessionToken(sessionToken)
-            updateAgentToken(agentID: selectedAgent.agentID, sessionToken: sessionToken)
-            try await syncStoredPushToken(identity: identity)
-            connectionState = .authenticating
-            await connectRealtime(
-                deviceID: identity.deviceID,
-                agentID: selectedAgent.agentID,
-                sessionToken: sessionToken
-            )
-            guard connectionState == .connected else {
-                throw AppModelError.realtimeNotConnected
-            }
             let metadataRequestID = UUID().uuidString.lowercased()
-            try await withTimeout(realtimeSendTimeout) {
+            try await sendRealtimeRequestWithRecovery(
+                identity: identity,
+                agent: selectedAgent,
+                operationLabel: "metadata_refresh",
+                forceReconnect: true,
+                afterAuthentication: { [self] _, _ in
+                    try await syncStoredPushToken(identity: identity)
+                }
+            ) { controller in
                 try await controller.requestMetadataRefresh(
                     request: MetadataRefreshRequestData(
                         requestID: metadataRequestID,
@@ -254,7 +248,9 @@ final class AppModel {
                 pendingError = AppModelError.serverForgotDevice.localizedDescription
                 return
             }
-            pendingError = error.localizedDescription
+            if !isTransientRealtimeDisconnect(error) {
+                pendingError = error.localizedDescription
+            }
             updateAgentOnline(agentID: selectedAgent.agentID, isOnline: false)
             connectionState = .degraded
         }
