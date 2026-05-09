@@ -113,7 +113,15 @@ extension AppModel {
             case .text:
                 break
             case .fileChangeSummary:
-                lines.append("\(part.files ?? 0) 个文件已更改 +\(part.additions ?? 0) -\(part.deletions ?? 0)")
+                lines.append(
+                    L10n.string(
+                        "content_part.file_changes.summary",
+                        language: appLanguage,
+                        part.files ?? 0,
+                        part.additions ?? 0,
+                        part.deletions ?? 0
+                    )
+                )
             }
         }
         return lines.joined(separator: "\n")
@@ -121,12 +129,12 @@ extension AppModel {
 
     func fileLabel(for part: ContentPart) -> String {
         if part.fileType == "image" || part.mimeType?.hasPrefix("image/") == true {
-            return "图片"
+            return L10n.string("file.kind.image", language: appLanguage)
         }
         if part.fileType == "video" || part.mimeType?.hasPrefix("video/") == true {
-            return "视频"
+            return L10n.string("file.kind.video", language: appLanguage)
         }
-        return "文件"
+        return L10n.string("file.kind.file", language: appLanguage)
     }
 
     /// Updates the in-memory thread index used by visible session lists.

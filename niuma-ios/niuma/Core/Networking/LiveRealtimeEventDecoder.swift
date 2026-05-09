@@ -436,14 +436,19 @@ enum LiveRealtimeEventDecoder {
             case .fileRef:
                 let name = part.fileName ?? part.alt ?? part.transferID ?? "attachment"
                 if part.fileType == "image" || part.mimeType?.hasPrefix("image/") == true {
-                    return "[图片: \(name)]"
+                    return String(format: String(localized: "content_part.image.preview", table: "Localizable"), name)
                 }
                 if part.fileType == "video" || part.mimeType?.hasPrefix("video/") == true {
-                    return "[视频: \(name)]"
+                    return String(format: String(localized: "content_part.video.preview", table: "Localizable"), name)
                 }
-                return "[附件: \(name)]"
+                return String(format: String(localized: "content_part.attachment.preview", table: "Localizable"), name)
             case .fileChangeSummary:
-                return "\(part.files ?? 0) 个文件已更改 +\(part.additions ?? 0) -\(part.deletions ?? 0)"
+                return String(
+                    format: String(localized: "content_part.file_changes.summary", table: "Localizable"),
+                    part.files ?? 0,
+                    part.additions ?? 0,
+                    part.deletions ?? 0
+                )
             }
         }
         .filter { !$0.isEmpty }

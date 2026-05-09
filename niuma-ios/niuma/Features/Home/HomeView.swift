@@ -15,7 +15,7 @@ struct HomeView: View {
         .niumaScreenBackground()
         .toolbar(.hidden, for: .navigationBar)
         .confirmationDialog(
-            appModel.localized("删除桌面绑定", "Remove Desktop Link"),
+            appModel.localized("home.remove_link.title"),
             isPresented: Binding(
                 get: { agentPendingRemoval != nil },
                 set: { newValue in
@@ -27,22 +27,19 @@ struct HomeView: View {
             titleVisibility: .visible
         ) {
             if let agentPendingRemoval {
-                Button(appModel.localized("删除绑定", "Remove Link"), role: .destructive) {
+                Button(appModel.localized("home.remove_link.action"), role: .destructive) {
                     Task {
                         await appModel.removePairedAgent(agentPendingRemoval)
                         self.agentPendingRemoval = nil
                     }
                 }
             }
-            Button(appModel.localized("取消", "Cancel"), role: .cancel) {
+            Button(appModel.localized("common.cancel"), role: .cancel) {
                 agentPendingRemoval = nil
             }
         } message: {
             if let agentPendingRemoval {
-                Text(appModel.localized(
-                    "将移除桌面 “\(agentPendingRemoval.displayName)” 的当前绑定。",
-                    "This removes the current link to desktop “\(agentPendingRemoval.displayName)”."
-                ))
+                Text(appModel.localized("home.remove_link.message", agentPendingRemoval.displayName))
             }
         }
     }
@@ -67,7 +64,7 @@ struct HomeView: View {
                 Text("Niuma")
                     .font(.system(size: 30, weight: .bold))
                     .foregroundStyle(NiumaPalette.ink)
-                Text(appModel.localized("最近需要处理的项目和对话", "Projects and chats needing attention"))
+                Text(appModel.localized("home.subtitle"))
                     .font(.caption)
                     .foregroundStyle(NiumaPalette.mutedInk)
             }
@@ -122,7 +119,7 @@ struct HomeView: View {
 
     private var devicesSection: some View {
         VStack(alignment: .leading, spacing: 12) {
-            sectionHeader(appModel.localized("设备", "Devices"))
+            sectionHeader(appModel.localized("home.devices"))
 
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 10) {
@@ -143,7 +140,7 @@ struct HomeView: View {
                                 agentPendingRemoval = agent
                             } label: {
                                 Label(
-                                    appModel.localized("删除绑定", "Remove Link"),
+                                    appModel.localized("home.remove_link.action"),
                                     systemImage: "trash"
                                 )
                             }
@@ -159,7 +156,7 @@ struct HomeView: View {
                                 .foregroundStyle(NiumaPalette.ink)
                                 .frame(width: 38, height: 38)
                                 .background(Circle().fill(NiumaPalette.raisedCard))
-                            Text(appModel.localized("添加", "Add"))
+                            Text(appModel.localized("common.add"))
                                 .font(.caption)
                                 .foregroundStyle(NiumaPalette.mutedInk)
                         }
@@ -172,10 +169,10 @@ struct HomeView: View {
 
     private var projectsSection: some View {
         VStack(alignment: .leading, spacing: 14) {
-            sectionHeader(appModel.localized("项目", "Projects"))
+            sectionHeader(appModel.localized("home.projects"))
 
             if appModel.visibleProjects.isEmpty {
-                placeholderRow(appModel.localized("还没有同步到项目。", "No projects synced yet."))
+                placeholderRow(appModel.localized("home.projects.empty"))
             } else {
                 VStack(spacing: 6) {
                     ForEach(appModel.visibleProjects) { project in
@@ -194,7 +191,7 @@ struct HomeView: View {
 
     private var recentSection: some View {
         VStack(alignment: .leading, spacing: 14) {
-            sectionHeader(appModel.localized("对话", "Chats")) {
+            sectionHeader(appModel.localized("home.chats")) {
                 NavigationLink {
                     NewTaskView()
                 } label: {
@@ -208,7 +205,7 @@ struct HomeView: View {
             }
 
             if appModel.conversationSessions.isEmpty {
-                placeholderRow(appModel.localized("还没有可显示的对话。", "No chats available yet."))
+                placeholderRow(appModel.localized("home.chats.empty"))
             } else {
                 VStack(spacing: 6) {
                     ForEach(appModel.conversationSessions) { session in
@@ -218,7 +215,7 @@ struct HomeView: View {
                                 project: sessionProject ?? ProjectSummary(
                                     projectID: session.projectID,
                                     agentID: session.agentID,
-                                    projectName: appModel.localized("无项目", "No Project"),
+                                    projectName: appModel.localized("project.none"),
                                     updatedAt: session.updatedAt
                                 ),
                                 session: session
@@ -280,7 +277,7 @@ private struct DeviceChip: View {
                 Circle()
                     .fill(agent.isOnline ? NiumaPalette.accent : NiumaPalette.mutedInk.opacity(0.35))
                     .frame(width: 7, height: 7)
-                Text(appModel.localized(agent.isOnline ? "在线" : "离线", agent.isOnline ? "Online" : "Offline"))
+                Text(appModel.localized(agent.isOnline ? "device.online" : "device.offline"))
                     .font(.caption2)
                     .foregroundStyle(NiumaPalette.mutedInk)
             }
@@ -358,7 +355,7 @@ private struct RecentSessionRow: View {
             HStack(spacing: 8) {
                 if pendingApprovals > 0 {
                     StatusBadge(
-                        title: appModel.localized("\(pendingApprovals) 待审批", "\(pendingApprovals) approvals"),
+                        title: appModel.localized("approval.pending.count.other", pendingApprovals),
                         tone: .warning
                     )
                 }

@@ -318,17 +318,17 @@ private enum ComposerSpeechTranscriberError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .microphonePermissionDenied:
-            return "未获得麦克风权限，无法录制语音。"
+            return String(localized: "speech.error.microphone_permission_denied", table: "Localizable")
         case .transcriberUnavailable:
-            return "当前设备不支持 iOS 26 SpeechTranscriber。"
+            return String(localized: "speech.error.transcriber_unavailable", table: "Localizable")
         case .unsupportedLocale(let locale):
-            return "当前语言不支持语音转文字：\(locale)。"
+            return String(format: String(localized: "speech.error.unsupported_locale", table: "Localizable"), locale)
         case .missingAnalyzerFormat:
-            return "无法获取 SpeechAnalyzer 需要的音频格式。"
+            return String(localized: "speech.error.missing_analyzer_format", table: "Localizable")
         case .converterUnavailable:
-            return "无法创建语音转写所需的音频转换器。"
+            return String(localized: "speech.error.converter_unavailable", table: "Localizable")
         case .conversionFailed:
-            return "语音音频格式转换失败。"
+            return String(localized: "speech.error.conversion_failed", table: "Localizable")
         }
     }
 }

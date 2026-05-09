@@ -6,25 +6,25 @@ private enum ApprovalResolutionAction: Equatable {
     case allowSession
     case reject
 
-    var title: String {
+    func title(for language: AppLanguage) -> String {
         switch self {
         case .allowTurn:
-            return "本次允许"
+            return L10n.string("approval.action.allow_turn", language: language)
         case .allowSession:
-            return "本会话允许"
+            return L10n.string("approval.action.allow_session", language: language)
         case .reject:
-            return "拒绝"
+            return L10n.string("approval.action.reject", language: language)
         }
     }
 
-    var submittedTitle: String {
+    func submittedTitle(for language: AppLanguage) -> String {
         switch self {
         case .allowTurn:
-            return "正在允许本次..."
+            return L10n.string("approval.action.allow_turn.submitting", language: language)
         case .allowSession:
-            return "正在允许本会话..."
+            return L10n.string("approval.action.allow_session.submitting", language: language)
         case .reject:
-            return "正在拒绝..."
+            return L10n.string("approval.action.reject.submitting", language: language)
         }
     }
 }
@@ -53,23 +53,23 @@ struct ApprovalDetailView: View {
     }
 
     var body: some View {
-        let presentation = ApprovalPresentation(approval: currentApproval)
+        let presentation = ApprovalPresentation(approval: currentApproval, language: appModel.appLanguage)
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
-                SurfaceCard(title: "审批类型") {
+                SurfaceCard(title: appModel.localized("approval.detail.type_section")) {
                     ApprovalTypeSummaryView(presentation: presentation)
                 }
 
-                SurfaceCard(title: "请求内容") {
+                SurfaceCard(title: appModel.localized("approval.detail.request_section")) {
                     VStack(alignment: .leading, spacing: 12) {
                         ApprovalReadableRow(
-                            title: "要执行的动作",
+                            title: appModel.localized("approval.detail.action"),
                             value: presentation.actionText,
                             monospaced: presentation.actionMonospaced
                         )
                         ApprovalReadableRow(
-                            title: "原因",
-                            value: presentation.reasonText ?? "未提供原因"
+                            title: appModel.localized("approval.detail.reason"),
+                            value: presentation.reasonText ?? appModel.localized("approval.detail.reason.empty")
                         )
                         ForEach(presentation.contextRows) { row in
                             ApprovalReadableRow(
@@ -81,7 +81,7 @@ struct ApprovalDetailView: View {
                     }
                 }
 
-                SurfaceCard(title: "操作") {
+                SurfaceCard(title: appModel.localized("approval.detail.actions_section")) {
                     VStack(spacing: 12) {
                         ApprovalActionButton(
                             action: .allowTurn,
@@ -119,7 +119,7 @@ struct ApprovalDetailView: View {
             .padding()
         }
         .niumaScreenBackground()
-        .navigationTitle("审批详情")
+        .navigationTitle(appModel.localized("approval.detail.title"))
         .onChange(of: currentApproval.status) { _, status in
             if status == .resolved {
                 submittedAction = nil
@@ -142,10 +142,10 @@ struct ApprovalDetailView: View {
             return ApprovalFeedback(text: failureMessage, tone: .critical)
         }
         if isResolved {
-            return ApprovalFeedback(text: "审批已处理", tone: .positive)
+            return ApprovalFeedback(text: appModel.localized("approval.feedback.resolved"), tone: .positive)
         }
         if isWaitingForConfirmation {
-            return ApprovalFeedback(text: "已提交，等待桌面确认", tone: .neutral)
+            return ApprovalFeedback(text: appModel.localized("approval.feedback.waiting"), tone: .neutral)
         }
         return nil
     }
@@ -194,7 +194,7 @@ nonisolated struct ApprovalPresentation {
     let reasonText: String?
     let contextRows: [ContextRow]
 
-    init(approval: ApprovalSummary) {
+    init(approval: ApprovalSummary, language: AppLanguage) {
         let params = Self.paramsDictionary(from: approval.paramsJSON)
         let type = Self.canonicalType(for: approval)
         var actionText = Self.fallbackActionText(for: approval)
@@ -206,54 +206,54 @@ nonisolated struct ApprovalPresentation {
             if let command = Self.cleanString(params["command"]) {
                 actionText = command
                 actionMonospaced = true
-            } else if let firstAction = Self.commandActionSummaries(from: params).first {
+            } else if let firstAction = Self.commandActionSummaries(from: params, language: language).first {
                 actionText = firstAction
             } else {
-                actionText = "执行命令"
+                actionText = L10n.string("approval.action_text.execute_command", language: language)
             }
-            let actionSummaries = Self.commandActionSummaries(from: params)
+            let actionSummaries = Self.commandActionSummaries(from: params, language: language)
             if !actionSummaries.isEmpty {
                 contextRows.append(
                     ContextRow(
                         id: "command-actions",
-                        title: "解析动作",
+                        title: L10n.string("approval.context.parsed_actions", language: language),
                         value: actionSummaries.prefix(3).joined(separator: "\n"),
                         monospaced: false
                     )
                 )
             }
             if let cwd = Self.cleanString(params["cwd"]) {
-                contextRows.append(ContextRow(id: "cwd", title: "工作目录", value: cwd, monospaced: true))
+                contextRows.append(ContextRow(id: "cwd", title: L10n.string("approval.context.cwd", language: language), value: cwd, monospaced: true))
             }
         case "file_change":
             if let grantRoot = Self.cleanString(params["grantRoot"]) {
-                actionText = "允许修改 \(grantRoot)"
+                actionText = L10n.string("approval.action_text.allow_modify", language: language, grantRoot)
                 actionMonospaced = true
-                contextRows.append(ContextRow(id: "grant-root", title: "影响范围", value: grantRoot, monospaced: true))
+                contextRows.append(ContextRow(id: "grant-root", title: L10n.string("approval.context.scope", language: language), value: grantRoot, monospaced: true))
             } else {
-                actionText = "允许本次文件变更"
+                actionText = L10n.string("approval.action_text.allow_file_change", language: language)
             }
         case "permissions":
-            actionText = "调整会话权限"
-            if let permissionSummary = Self.permissionSummary(from: params["permissions"]) {
+            actionText = L10n.string("approval.action_text.adjust_permissions", language: language)
+            if let permissionSummary = Self.permissionSummary(from: params["permissions"], language: language) {
                 contextRows.append(
                     ContextRow(
                         id: "permissions",
-                        title: "权限范围",
+                        title: L10n.string("approval.context.permissions", language: language),
                         value: permissionSummary,
                         monospaced: false
                     )
                 )
             }
             if let cwd = Self.cleanString(params["cwd"]) {
-                contextRows.append(ContextRow(id: "cwd", title: "工作目录", value: cwd, monospaced: true))
+                contextRows.append(ContextRow(id: "cwd", title: L10n.string("approval.context.cwd", language: language), value: cwd, monospaced: true))
             }
         default:
             break
         }
 
-        self.typeTitle = Self.typeTitle(for: type, fallback: approval.approvalType)
-        self.typeSubtitle = Self.typeSubtitle(for: type)
+        self.typeTitle = Self.typeTitle(for: type, fallback: approval.approvalType, language: language)
+        self.typeSubtitle = Self.typeSubtitle(for: type, language: language)
         self.iconName = Self.iconName(for: type)
         self.actionText = actionText
         self.actionMonospaced = actionMonospaced
@@ -277,29 +277,29 @@ nonisolated struct ApprovalPresentation {
         return approval.approvalType
     }
 
-    private static func typeTitle(for type: String, fallback: String) -> String {
+    private static func typeTitle(for type: String, fallback: String, language: AppLanguage) -> String {
         switch type {
         case "shell_command":
-            return "命令执行"
+            return L10n.string("approval.type.shell_command", language: language)
         case "file_change":
-            return "文件修改"
+            return L10n.string("approval.type.file_change", language: language)
         case "permissions":
-            return "权限申请"
+            return L10n.string("approval.type.permissions", language: language)
         default:
             return fallback
         }
     }
 
-    private static func typeSubtitle(for type: String) -> String {
+    private static func typeSubtitle(for type: String, language: AppLanguage) -> String {
         switch type {
         case "shell_command":
-            return "需要确认这条命令是否可以执行"
+            return L10n.string("approval.type.shell_command.subtitle", language: language)
         case "file_change":
-            return "需要确认是否允许这次文件变更"
+            return L10n.string("approval.type.file_change.subtitle", language: language)
         case "permissions":
-            return "需要确认是否调整当前会话权限"
+            return L10n.string("approval.type.permissions.subtitle", language: language)
         default:
-            return "需要你确认这条请求是否可以继续"
+            return L10n.string("approval.type.default.subtitle", language: language)
         }
     }
 
@@ -338,7 +338,7 @@ nonisolated struct ApprovalPresentation {
         return trimmed.isEmpty ? nil : trimmed
     }
 
-    private static func commandActionSummaries(from params: [String: Any]) -> [String] {
+    private static func commandActionSummaries(from params: [String: Any], language: AppLanguage) -> [String] {
         guard let actions = params["commandActions"] as? [[String: Any]] else { return [] }
         return actions.compactMap { action in
             let type = cleanString(action["type"])
@@ -346,22 +346,22 @@ nonisolated struct ApprovalPresentation {
             switch type {
             case "read":
                 if let name = cleanString(action["name"]) {
-                    return "读取 \(name)"
+                    return L10n.string("approval.command_action.read", language: language, name)
                 }
                 if let path = cleanString(action["path"]) {
-                    return "读取 \(path)"
+                    return L10n.string("approval.command_action.read", language: language, path)
                 }
             case "listFiles":
                 if let path = cleanString(action["path"]) {
-                    return "列出 \(path)"
+                    return L10n.string("approval.command_action.list", language: language, path)
                 }
-                return "列出文件"
+                return L10n.string("approval.command_action.list_files", language: language)
             case "search":
                 if let query = cleanString(action["query"]) {
-                    return "搜索 \(query)"
+                    return L10n.string("approval.command_action.search", language: language, query)
                 }
                 if let path = cleanString(action["path"]) {
-                    return "搜索 \(path)"
+                    return L10n.string("approval.command_action.search", language: language, path)
                 }
             default:
                 break
@@ -370,52 +370,52 @@ nonisolated struct ApprovalPresentation {
         }
     }
 
-    private static func permissionSummary(from value: Any?) -> String? {
+    private static func permissionSummary(from value: Any?, language: AppLanguage) -> String? {
         guard let permissions = value as? [String: Any] else { return nil }
         var summaries: [String] = []
 
         if let fileSystem = permissions["fileSystem"] as? [String: Any] {
             if let entries = fileSystem["entries"] as? [[String: Any]] {
                 summaries.append(contentsOf: entries.compactMap { entry in
-                    permissionEntrySummary(entry)
+                    permissionEntrySummary(entry, language: language)
                 })
             }
             if let reads = stringArray(fileSystem["read"]), !reads.isEmpty {
-                summaries.append("读取 \(reads.joined(separator: "、"))")
+                summaries.append(L10n.string("approval.permission.read", language: language, reads.joined(separator: ", ")))
             }
             if let writes = stringArray(fileSystem["write"]), !writes.isEmpty {
-                summaries.append("写入 \(writes.joined(separator: "、"))")
+                summaries.append(L10n.string("approval.permission.write", language: language, writes.joined(separator: ", ")))
             }
         }
 
         if let network = permissions["network"] as? [String: Any],
            let enabled = network["enabled"] as? Bool {
-            summaries.append(enabled ? "允许网络访问" : "关闭网络访问")
+            summaries.append(L10n.string(enabled ? "approval.permission.network.enabled" : "approval.permission.network.disabled", language: language))
         }
 
         return summaries.isEmpty ? nil : summaries.prefix(4).joined(separator: "\n")
     }
 
-    private static func permissionEntrySummary(_ entry: [String: Any]) -> String? {
+    private static func permissionEntrySummary(_ entry: [String: Any], language: AppLanguage) -> String? {
         let accessTitle: String
         switch cleanString(entry["access"]) {
         case "read":
-            accessTitle = "读取"
+            accessTitle = L10n.string("approval.permission.access.read", language: language)
         case "write":
-            accessTitle = "写入"
+            accessTitle = L10n.string("approval.permission.access.write", language: language)
         case "none":
-            accessTitle = "无访问"
+            accessTitle = L10n.string("approval.permission.access.none", language: language)
         default:
-            accessTitle = "访问"
+            accessTitle = L10n.string("approval.permission.access.default", language: language)
         }
 
-        guard let path = fileSystemPathDescription(entry["path"]) else {
+        guard let path = fileSystemPathDescription(entry["path"], language: language) else {
             return nil
         }
         return "\(accessTitle) \(path)"
     }
 
-    private static func fileSystemPathDescription(_ value: Any?) -> String? {
+    private static func fileSystemPathDescription(_ value: Any?, language: AppLanguage) -> String? {
         if let string = cleanString(value) {
             return string
         }
@@ -426,26 +426,26 @@ nonisolated struct ApprovalPresentation {
         case "glob_pattern":
             return cleanString(object["pattern"])
         case "special":
-            return specialPathDescription(object["value"])
+            return specialPathDescription(object["value"], language: language)
         default:
             return nil
         }
     }
 
-    private static func specialPathDescription(_ value: Any?) -> String? {
+    private static func specialPathDescription(_ value: Any?, language: AppLanguage) -> String? {
         guard let object = value as? [String: Any] else { return nil }
         switch cleanString(object["kind"]) {
         case "root":
-            return "全磁盘"
+            return L10n.string("approval.path.root", language: language)
         case "minimal":
-            return "默认最小范围"
+            return L10n.string("approval.path.minimal", language: language)
         case "project_roots":
             if let subpath = cleanString(object["subpath"]) {
-                return "项目目录/\(subpath)"
+                return L10n.string("approval.path.project_roots.subpath", language: language, subpath)
             }
-            return "项目目录"
+            return L10n.string("approval.path.project_roots", language: language)
         case "tmpdir":
-            return "临时目录"
+            return L10n.string("approval.path.tmpdir", language: language)
         case "slash_tmp":
             return "/tmp"
         case "unknown":
@@ -533,6 +533,8 @@ private struct ApprovalFeedbackView: View {
 }
 
 private struct ApprovalActionButton: View {
+    @Environment(AppModel.self) private var appModel
+
     let action: ApprovalResolutionAction
     let submittedAction: ApprovalResolutionAction?
     let isDisabled: Bool
@@ -551,7 +553,7 @@ private struct ApprovalActionButton: View {
                         .controlSize(.small)
                         .tint(tone.foreground)
                 }
-                Text(isSubmitting ? action.submittedTitle : action.title)
+                Text(isSubmitting ? action.submittedTitle(for: appModel.appLanguage) : action.title(for: appModel.appLanguage))
                     .lineLimit(1)
                     .minimumScaleFactor(0.85)
             }

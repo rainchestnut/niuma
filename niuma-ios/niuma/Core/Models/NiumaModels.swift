@@ -659,35 +659,35 @@ nonisolated enum AppModelError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .invalidPairPayload:
-            return "扫描到的配对二维码不完整或格式错误，请重试。"
+            return String(localized: "error.invalid_pair_payload", table: "Localizable")
         case .pairingRevocationFailed:
-            return "删除桌面绑定失败，请稍后重试。"
+            return String(localized: "error.pairing_revocation_failed", table: "Localizable")
         case .missingPrivateKey:
-            return "本地设备密钥缺失，需要重新初始化设备身份。"
+            return String(localized: "error.missing_private_key", table: "Localizable")
         case .missingSessionToken:
-            return "当前桌面会话令牌无效，请重新鉴权。"
+            return String(localized: "error.missing_session_token", table: "Localizable")
         case .realtimeNotConnected:
-            return "实时通道尚未建立，无法发送任务。"
+            return String(localized: "error.realtime_not_connected", table: "Localizable")
         case .realtimeOperationStalled:
-            return "实时通道无响应，请稍后重试。"
+            return String(localized: "error.realtime_operation_stalled", table: "Localizable")
         case .missingProjectSelection:
-            return "请先选择一个项目。"
+            return String(localized: "error.missing_project_selection", table: "Localizable")
         case .missingPrompt:
-            return "任务内容不能为空。"
+            return String(localized: "error.missing_prompt", table: "Localizable")
         case .transferChecksumMismatch:
-            return "收到的附件校验失败，请重新同步会话。"
+            return String(localized: "error.transfer_checksum_mismatch", table: "Localizable")
         case .transferIdentifierMismatch:
-            return "附件传输标识与本地校验结果不一致，请重试。"
+            return String(localized: "error.transfer_identifier_mismatch", table: "Localizable")
         case .serverForgotDevice:
-            return "服务器不再认识当前移动设备身份，已清理本地绑定，请重新扫描桌面二维码完成配对。"
+            return String(localized: "error.server_forgot_device", table: "Localizable")
         case .serverNotConfigured:
-            return "请先手动输入 Niuma Server 地址并应用。"
+            return String(localized: "error.server_not_configured", table: "Localizable")
         case .missingDeviceIdentity:
-            return "本机设备身份缺失，请重新配对后再处理审批。"
+            return String(localized: "error.missing_device_identity", table: "Localizable")
         case .missingAgentBinding:
-            return "当前没有可用的桌面绑定，无法发送审批响应。"
+            return String(localized: "error.missing_agent_binding", table: "Localizable")
         case .approvalNotPending:
-            return "该审批已不在待处理状态，请刷新会话后重试。"
+            return String(localized: "error.approval_not_pending", table: "Localizable")
         }
     }
 }

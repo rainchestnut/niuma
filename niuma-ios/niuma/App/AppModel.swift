@@ -150,7 +150,7 @@ final class AppModel {
     }
 
     var displayedModelID: String {
-        selectedModelID ?? availableModels.first ?? "模型"
+        selectedModelID ?? availableModels.first ?? localized("model.placeholder")
     }
 
     var hasPairedAgent: Bool {
@@ -158,11 +158,11 @@ final class AppModel {
     }
 
     var controllerModeLabel: String {
-        controller?.modeLabel ?? localized("未配置服务地址", "Server Not Configured")
+        controller?.modeLabel ?? localized("settings.server.not_configured")
     }
 
     var serverBaseURLPlaceholder: String {
-        localized("手动输入 Niuma Server 地址", "Enter Niuma Server address")
+        localized("settings.server.placeholder")
     }
 
     var localeIdentifier: String {

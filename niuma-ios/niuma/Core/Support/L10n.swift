@@ -13,6 +13,10 @@ nonisolated enum L10n {
     }
 
     static func string(_ key: String, language: AppLanguage, _ arguments: CVarArg...) -> String {
+        string(key, language: language, arguments)
+    }
+
+    static func string(_ key: String, language: AppLanguage, _ arguments: [CVarArg]) -> String {
         String(
             format: string(key, language: language),
             locale: Locale(identifier: language.localeIdentifier),

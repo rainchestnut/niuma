@@ -7,7 +7,7 @@ struct ApprovalTimelineRow: View {
     let approval: ApprovalSummary
 
     private var presentation: ApprovalPresentation {
-        ApprovalPresentation(approval: approval)
+        ApprovalPresentation(approval: approval, language: appModel.appLanguage)
     }
 
     var body: some View {

@@ -58,7 +58,7 @@ extension AppModel {
                         await handle(event)
                     }
                     if !Task.isCancelled {
-                        await failActiveRefreshes(error: "实时连接已关闭，刷新未完成")
+                        await failActiveRefreshes(error: localized("realtime.error.closed_refresh_incomplete"))
                         connectionState = .degraded
                         updateAgentOnline(agentID: agentID, isOnline: false)
                     }
@@ -66,7 +66,7 @@ extension AppModel {
                     if !Task.isCancelled {
                         let isTransientDisconnect = isTransientRealtimeDisconnect(error)
                         await failActiveRefreshes(
-                            error: "实时连接中断，刷新未完成",
+                            error: localized("realtime.error.interrupted_refresh_incomplete"),
                             presentsAlert: !isTransientDisconnect
                         )
                         connectionState = .degraded
@@ -232,9 +232,9 @@ extension AppModel {
             || message.contains("broken pipe")
             || message.contains("cancelled")
             || message.contains("closed")
-            || message.contains("软件导致连接中止")
-            || message.contains("连接中止")
-            || message.contains("连接已中断")
+            || message.contains("\u{8F6F}\u{4EF6}\u{5BFC}\u{81F4}\u{8FDE}\u{63A5}\u{4E2D}\u{6B62}")
+            || message.contains("\u{8FDE}\u{63A5}\u{4E2D}\u{6B62}")
+            || message.contains("\u{8FDE}\u{63A5}\u{5DF2}\u{4E2D}\u{65AD}")
     }
 
     /// Downloads an encrypted server relay transfer once and stores it for local rendering.

@@ -72,7 +72,7 @@ struct ThreadComposerBar: View {
                         ComposerPill(title: appModel.selectedReasoningEffort.rawValue)
                     }
                     .buttonStyle(.plain)
-                    .accessibilityLabel("选择思考深度")
+                    .accessibilityLabel(appModel.localized("thread.reasoning.accessibility"))
                     .accessibilityIdentifier("thread-reasoning-effort-menu")
                     permissionMenu
                     Spacer()
@@ -99,7 +99,7 @@ struct ThreadComposerBar: View {
                     }
                     .buttonStyle(.plain)
                     .disabled(isSending)
-                    .accessibilityLabel("添加附件")
+                    .accessibilityLabel(appModel.localized("thread.attachment.add.accessibility"))
                     .accessibilityIdentifier("thread-attachment-button")
 
                     HStack(alignment: .bottom, spacing: 10) {
@@ -124,7 +124,7 @@ struct ThreadComposerBar: View {
                             }
                             .layoutPriority(1)
                             .frame(maxWidth: .infinity, alignment: .leading)
-                            .accessibilityLabel("消息输入")
+                            .accessibilityLabel(appModel.localized("thread.input.accessibility"))
                             .accessibilityIdentifier("thread-prompt-field")
 
                         Button {
@@ -153,7 +153,7 @@ struct ThreadComposerBar: View {
                         }
                         .buttonStyle(.plain)
                         .disabled(isSending || speechTranscriber.isFinalizing)
-                        .accessibilityLabel(speechTranscriber.isRecording ? "停止语音输入" : "开始语音输入")
+                        .accessibilityLabel(appModel.localized(speechTranscriber.isRecording ? "thread.voice.stop" : "thread.voice.start"))
                         .accessibilityIdentifier("thread-voice-input-button")
 
                         Button {
@@ -176,7 +176,7 @@ struct ThreadComposerBar: View {
                         .buttonStyle(.plain)
                         .disabled(!canSend)
                         .opacity(canSend ? 1 : 0.45)
-                        .accessibilityLabel("发送")
+                        .accessibilityLabel(appModel.localized("common.send"))
                         .accessibilityIdentifier("thread-send-button")
                     }
                 }
@@ -247,7 +247,7 @@ struct ThreadComposerBar: View {
 
     private var permissionMenu: some View {
         Menu {
-            Section("权限") {
+            Section(appModel.localized("thread.permissions.section")) {
                 ForEach(permissionPresets) { preset in
                     Button {
                         appModel.selectApprovalPermissionPreset(preset)
@@ -261,7 +261,7 @@ struct ThreadComposerBar: View {
             }
 
             if appModel.approvalPermissionPreset == .custom {
-                Section("审批策略") {
+                Section(appModel.localized("thread.permissions.approval_policy")) {
                     ForEach(CodexApprovalPolicy.allCases) { policy in
                         Button {
                             appModel.selectCustomApprovalPolicy(policy)
@@ -274,7 +274,7 @@ struct ThreadComposerBar: View {
                     }
                 }
 
-                Section("审查人") {
+                Section(appModel.localized("thread.permissions.reviewer")) {
                     ForEach(CodexApprovalsReviewer.allCases) { reviewer in
                         Button {
                             appModel.selectCustomApprovalsReviewer(reviewer)
@@ -287,7 +287,7 @@ struct ThreadComposerBar: View {
                     }
                 }
 
-                Section("沙盒") {
+                Section(appModel.localized("thread.permissions.sandbox")) {
                     ForEach(CodexSandboxMode.allCases) { mode in
                         Button {
                             appModel.selectCustomSandboxMode(mode)
@@ -304,7 +304,7 @@ struct ThreadComposerBar: View {
             ComposerPill(title: permissionPresetTitle(appModel.approvalPermissionPreset))
         }
         .buttonStyle(.plain)
-        .accessibilityLabel("选择权限")
+        .accessibilityLabel(appModel.localized("thread.permissions.accessibility"))
         .accessibilityIdentifier("thread-permission-menu")
     }
 
@@ -321,44 +321,44 @@ struct ThreadComposerBar: View {
     private func permissionPresetTitle(_ preset: ApprovalPermissionPreset) -> String {
         switch preset {
         case .defaultPermissions:
-            return "默认权限"
+            return appModel.localized("permission_preset.default")
         case .autoReview:
-            return "自动审查"
+            return appModel.localized("permission_preset.auto_review")
         case .fullAccess:
-            return "完全访问"
+            return appModel.localized("permission_preset.full_access")
         case .custom:
-            return "自定义"
+            return appModel.localized("permission_preset.custom")
         }
     }
 
     private func approvalPolicyTitle(_ policy: CodexApprovalPolicy) -> String {
         switch policy {
         case .untrusted:
-            return "不受信任"
+            return appModel.localized("approval_policy.untrusted")
         case .onRequest:
-            return "按需审批"
+            return appModel.localized("approval_policy.on_request")
         case .never:
-            return "不询问"
+            return appModel.localized("approval_policy.never")
         }
     }
 
     private func approvalsReviewerTitle(_ reviewer: CodexApprovalsReviewer) -> String {
         switch reviewer {
         case .user:
-            return "用户审查"
+            return appModel.localized("approval_reviewer.user")
         case .guardianSubagent:
-            return "自动审查"
+            return appModel.localized("approval_reviewer.guardian_subagent")
         }
     }
 
     private func sandboxModeTitle(_ mode: CodexSandboxMode) -> String {
         switch mode {
         case .readOnly:
-            return "只读"
+            return appModel.localized("sandbox_mode.read_only")
         case .workspaceWrite:
-            return "工作区写入"
+            return appModel.localized("sandbox_mode.workspace_write")
         case .dangerFullAccess:
-            return "完全访问"
+            return appModel.localized("sandbox_mode.danger_full_access")
         }
     }
 }

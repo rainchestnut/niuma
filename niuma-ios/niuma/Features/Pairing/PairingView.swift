@@ -24,16 +24,11 @@ struct PairingView: View {
             VStack(alignment: .leading, spacing: 20) {
                 header
 
-                SurfaceCard(title: appModel.localized("桌面配对", "Desktop Pairing")) {
+                SurfaceCard(title: appModel.localized("pairing.title")) {
                     VStack(alignment: .leading, spacing: 18) {
                         gatewaySummary
 
-                        ServerEndpointEditor(
-                            helpText: appModel.localized(
-                                "请输入与桌面 Gateway 相同的 Niuma Server 地址，应用后再扫码配对。",
-                                "Enter the same Niuma Server address used by the desktop Gateway, then apply it before pairing."
-                            )
-                        )
+                        ServerEndpointEditor(helpText: appModel.localized("pairing.server.help"))
 
                         Divider()
                             .overlay(NiumaPalette.border)
@@ -41,7 +36,7 @@ struct PairingView: View {
                         cameraSection
 
                         #if DEBUG
-                        Button(isPairing ? "连接中…" : "模拟扫码当前桌面二维码") {
+                        Button(isPairing ? appModel.localized("pairing.connecting") : appModel.localized("pairing.debug.current_qr")) {
                             Task { await runDesktopDebugPair() }
                         }
                         .buttonStyle(.bordered)
@@ -64,7 +59,7 @@ struct PairingView: View {
             .padding(24)
         }
         .niumaScreenBackground()
-        .navigationTitle("桌面配对")
+        .navigationTitle(appModel.localized("pairing.title"))
         .navigationBarTitleDisplayMode(.inline)
         .task {
             // Re-check status on entry so we react to permission changes that
@@ -73,14 +68,12 @@ struct PairingView: View {
         }
         .fullScreenCover(isPresented: $isShowingScanner) {
             PairingScannerSheet(
-                title: appModel.localized("扫描桌面二维码", "Scan Desktop QR Code"),
-                idleMessage: appModel.localized(
-                    "将桌面 Gateway 的二维码放入取景框，识别后会自动配对。",
-                    "Place the desktop Gateway QR code in frame. Pairing starts automatically."
-                ),
+                title: appModel.localized("pairing.scan.title"),
+                idleMessage: appModel.localized("pairing.scan.idle"),
                 statusMessage: pairingStatusMessage,
                 errorMessage: scannerErrorMessage,
                 isPairing: isPairing,
+                language: appModel.appLanguage,
                 onClose: {
                     isShowingScanner = false
                 },
@@ -92,13 +85,10 @@ struct PairingView: View {
 
     private var header: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text(appModel.localized(dismissOnSuccess ? "添加桌面" : "连接 Niuma", dismissOnSuccess ? "Add Desktop" : "Connect Niuma"))
+            Text(appModel.localized(dismissOnSuccess ? "pairing.add_desktop" : "pairing.connect_niuma"))
                 .font(.system(size: 38, weight: .bold))
                 .foregroundStyle(NiumaPalette.ink)
-            Text(appModel.localized(
-                "绑定已启动 Niuma Gateway 的桌面设备后，首页会展示最近需要处理的项目和对话。",
-                "After linking a desktop device running Niuma Gateway, the home screen shows projects and chats needing attention."
-            ))
+            Text(appModel.localized("pairing.header.description"))
             .font(.body)
             .foregroundStyle(NiumaPalette.mutedInk)
             .fixedSize(horizontal: false, vertical: true)
@@ -114,13 +104,10 @@ struct PairingView: View {
                 .background(Circle().fill(NiumaPalette.darkButton))
 
             VStack(alignment: .leading, spacing: 4) {
-                Text(appModel.localized("连接运行中的 Niuma Gateway", "Connect a Running Niuma Gateway"))
+                Text(appModel.localized("pairing.gateway.title"))
                     .font(.headline.weight(.semibold))
                     .foregroundStyle(NiumaPalette.ink)
-                Text(appModel.localized(
-                    "移动端和桌面 Gateway 必须指向同一个 Niuma Server。",
-                    "Mobile and desktop Gateway must point to the same Niuma Server."
-                ))
+                Text(appModel.localized("pairing.gateway.description"))
                 .font(.footnote)
                 .foregroundStyle(NiumaPalette.mutedInk)
                 .fixedSize(horizontal: false, vertical: true)
@@ -133,10 +120,7 @@ struct PairingView: View {
         switch cameraStatus {
         case .authorized, .notDetermined:
             VStack(alignment: .leading, spacing: 12) {
-                Text(appModel.localized(
-                    "点击按钮打开相机，识别到桌面二维码后会自动完成配对。",
-                    "Open the camera and pairing will start as soon as the desktop QR code is recognized."
-                ))
+                Text(appModel.localized("pairing.camera.instructions"))
                 .font(.footnote)
                 .foregroundStyle(NiumaPalette.mutedInk)
                 .fixedSize(horizontal: false, vertical: true)
@@ -146,8 +130,8 @@ struct PairingView: View {
                 } label: {
                     Label(
                         isPairing
-                            ? appModel.localized("配对中…", "Pairing…")
-                            : appModel.localized("扫码配对", "Scan to Pair"),
+                            ? appModel.localized("pairing.pairing")
+                            : appModel.localized("pairing.scan.action"),
                         systemImage: "qrcode.viewfinder"
                     )
                 }
@@ -157,14 +141,14 @@ struct PairingView: View {
             }
         case .denied, .restricted:
             VStack(spacing: 12) {
-                Text(appModel.localized("相机权限已被拒绝。", "Camera access was denied."))
-                Button(appModel.localized("打开系统设置", "Open Settings")) {
+                Text(appModel.localized("pairing.camera.denied"))
+                Button(appModel.localized("pairing.open_settings")) {
                     openSystemSettings()
                 }
                 .buttonStyle(NiumaPrimaryButtonStyle())
             }
         @unknown default:
-            Text("无法获取相机状态。")
+            Text(appModel.localized("pairing.camera.unknown"))
         }
     }
 
@@ -196,13 +180,13 @@ struct PairingView: View {
         guard !isPairing else { return }
         isPairing = true
         defer { isPairing = false }
-        pairingStatusMessage = "正在完成桌面绑定…"
+        pairingStatusMessage = appModel.localized("pairing.status.confirming")
         let paired = await appModel.pairWithScannedPayload(raw)
         if paired {
             isShowingScanner = false
         } else {
             submittedScanRaw = nil
-            scannerErrorMessage = appModel.pendingError ?? "二维码无效或已过期，请重新扫描。"
+            scannerErrorMessage = appModel.pendingError ?? appModel.localized("pairing.scan.invalid")
         }
         await finishPairingIfNeeded(paired: paired)
     }
@@ -210,7 +194,7 @@ struct PairingView: View {
     private func runDesktopDebugPair() async {
         isPairing = true
         defer { isPairing = false }
-        pairingStatusMessage = "正在读取桌面 Gateway 二维码并完成绑定…"
+        pairingStatusMessage = appModel.localized("pairing.status.debug_pairing")
         let paired = await appModel.pairWithDesktopGateway()
         await finishPairingIfNeeded(paired: paired)
     }
@@ -232,10 +216,10 @@ struct PairingView: View {
     @MainActor
     private func finishPairingIfNeeded(paired: Bool) async {
         guard paired else {
-            pairingStatusMessage = appModel.pendingError ?? "绑定失败，请重试。"
+            pairingStatusMessage = appModel.pendingError ?? appModel.localized("pairing.status.failed")
             return
         }
-        pairingStatusMessage = "绑定成功，正在返回首页…"
+        pairingStatusMessage = appModel.localized("pairing.status.succeeded")
         try? await Task.sleep(for: .milliseconds(350))
         if dismissOnSuccess {
             dismiss()
@@ -250,6 +234,7 @@ private struct PairingScannerSheet: View {
     let statusMessage: String?
     let errorMessage: String?
     let isPairing: Bool
+    let language: AppLanguage
     let onClose: () -> Void
     let onScan: (String) -> Void
 
@@ -283,7 +268,7 @@ private struct PairingScannerSheet: View {
             }
             .buttonStyle(.plain)
             .disabled(isPairing)
-            .accessibilityLabel("关闭扫码")
+            .accessibilityLabel(L10n.string("pairing.scan.close", language: language))
             .accessibilityIdentifier("pairing-scanner-close-button")
 
             Text(title)

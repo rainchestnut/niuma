@@ -30,7 +30,7 @@ struct AppView: View {
                 await appModel.resumeAfterActivation()
             }
         }
-        .alert("出现问题", isPresented: Binding(
+        .alert(appModel.localized("app.error.title"), isPresented: Binding(
             get: { appModel.pendingError != nil },
             set: { newValue in
                 if !newValue {
@@ -38,7 +38,7 @@ struct AppView: View {
                 }
             }
         )) {
-            Button(appModel.localized("知道了", "OK"), role: .cancel) {
+            Button(appModel.localized("common.ok"), role: .cancel) {
                 appModel.dismissError()
             }
         } message: {
@@ -59,7 +59,7 @@ private struct PushThreadDestination: View {
                     project: appModel.project(for: thread.projectID) ?? ProjectSummary(
                         projectID: thread.projectID,
                         agentID: thread.agentID,
-                        projectName: appModel.localized("无项目", "No Project"),
+                        projectName: appModel.localized("project.none"),
                         updatedAt: thread.updatedAt
                     ),
                     session: thread
@@ -69,9 +69,9 @@ private struct PushThreadDestination: View {
                 }
             } else {
                 ContentUnavailableView(
-                    appModel.localized("正在同步任务进度", "Syncing task progress"),
+                    appModel.localized("push_thread.syncing.title"),
                     systemImage: "bell.badge",
-                    description: Text(appModel.localized("正在从桌面端读取最新详情。", "Reading the latest details from the desktop."))
+                    description: Text(appModel.localized("push_thread.syncing.description"))
                 )
                 .task {
                     await appModel.refresh()

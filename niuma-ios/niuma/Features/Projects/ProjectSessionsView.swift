@@ -31,7 +31,7 @@ struct ProjectSessionsView: View {
                                 .background(Circle().fill(NiumaPalette.raisedCard))
                         }
                         .buttonStyle(.plain)
-                        .accessibilityLabel("新建项目对话")
+                        .accessibilityLabel(appModel.localized("project.new_thread.accessibility"))
                         .accessibilityIdentifier("project-new-thread-button")
 
                         Button {
@@ -61,12 +61,12 @@ struct ProjectSessionsView: View {
                 }
 
                 VStack(alignment: .leading, spacing: 12) {
-                    Text("Session")
+                    Text(appModel.localized("project.sessions.title"))
                         .font(.title3.weight(.semibold))
                         .foregroundStyle(NiumaPalette.ink)
 
                     if appModel.threads(for: project.projectID).isEmpty {
-                        Text("当前项目还没有 session。")
+                        Text(appModel.localized("project.sessions.empty"))
                             .foregroundStyle(NiumaPalette.mutedInk)
                     } else {
                         VStack(spacing: 8) {
@@ -369,7 +369,7 @@ struct BranchChangesSheet: View {
                             Button {
                                 openBranchChangeDetail(result)
                             } label: {
-                                BranchChangeSummaryBlock(summary: summary)
+                                BranchChangeSummaryBlock(summary: summary, language: appModel.appLanguage)
                             }
                             .buttonStyle(.plain)
                             ForEach(result.filesSummary, id: \.path) { file in
@@ -381,23 +381,23 @@ struct BranchChangesSheet: View {
                                 .buttonStyle(.plain)
                             }
                         } else {
-                            Text(result.error ?? "无法读取分支变更。")
+                            Text(result.error ?? appModel.localized("branch_changes.error.unavailable"))
                                 .font(.footnote)
                                 .foregroundStyle(NiumaPalette.mutedInk)
                         }
                     } else if requestTimedOut {
-                        Text("桌面 Gateway 暂未返回分支变更，请确认桌面端已运行后重试。")
+                        Text(appModel.localized("branch_changes.timeout"))
                             .font(.footnote)
                             .foregroundStyle(NiumaPalette.mutedInk)
                     } else if didRequest {
                         HStack(spacing: 8) {
                             ProgressView()
-                            Text("正在读取当前 session 的分支变更。")
+                            Text(appModel.localized("branch_changes.loading"))
                                 .font(.footnote)
                                 .foregroundStyle(NiumaPalette.mutedInk)
                         }
                     } else {
-                        Text("尚未读取当前分支变更。")
+                        Text(appModel.localized("branch_changes.empty"))
                             .font(.footnote)
                             .foregroundStyle(NiumaPalette.mutedInk)
                     }
@@ -405,11 +405,11 @@ struct BranchChangesSheet: View {
                 .padding(16)
             }
             .niumaScreenBackground()
-            .navigationTitle("分支变更")
+            .navigationTitle(appModel.localized("branch_changes.title"))
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
-                    Button("关闭") { dismiss() }
+                    Button(appModel.localized("common.close")) { dismiss() }
                 }
                 ToolbarItem(placement: .topBarTrailing) {
                     Button {
@@ -481,11 +481,12 @@ struct BranchChangesSheet: View {
 
 private struct BranchChangeSummaryBlock: View {
     let summary: FileChangeBundleSummary
+    let language: AppLanguage
 
     var body: some View {
         HStack {
             VStack(alignment: .leading, spacing: 4) {
-                Text("\(summary.files) 个文件已更改")
+                Text(L10n.string("files.changed.other", language: language, summary.files))
                     .font(.headline)
                     .foregroundStyle(NiumaPalette.ink)
                 Text("+\(summary.additions) -\(summary.deletions)")

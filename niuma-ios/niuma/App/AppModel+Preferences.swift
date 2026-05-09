@@ -70,10 +70,7 @@ extension AppModel {
     func updateServerBaseURL(from rawValue: String) async -> Bool {
         serverBaseURLValidationMessage = nil
         guard let nextURL = Self.normalizedServerBaseURL(from: rawValue) else {
-            serverBaseURLValidationMessage = localized(
-                "请输入有效的 http 或 https 服务地址。",
-                "Enter a valid http or https server address."
-            )
+            serverBaseURLValidationMessage = localized("settings.server.invalid_url")
             return false
         }
 
@@ -92,14 +89,9 @@ extension AppModel {
         return true
     }
 
-    /// Returns the localized string for the active app language.
-    func localized(_ chinese: String, _ english: String) -> String {
-        switch appLanguage {
-        case .chinese:
-            return chinese
-        case .english:
-            return english
-        }
+    /// Returns String Catalog text using Niuma's in-app language setting.
+    func localized(_ key: String, _ arguments: CVarArg...) -> String {
+        L10n.string(key, language: appLanguage, arguments)
     }
 
     /// Authenticates the local identity with the paired desktop agent.

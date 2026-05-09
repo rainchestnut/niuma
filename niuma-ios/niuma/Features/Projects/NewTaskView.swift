@@ -27,13 +27,13 @@ struct NewTaskView: View {
     }
 
     private var targetTitle: String {
-        project?.projectName ?? appModel.localized("新对话", "New Chat")
+        project?.projectName ?? appModel.localized("new_task.title")
     }
 
     private var targetSubtitle: String {
         project == nil
-            ? appModel.localized("无项目对话", "No Project")
-            : appModel.localized("项目对话", "Project")
+            ? appModel.localized("new_task.projectless")
+            : appModel.localized("new_task.project")
     }
 
     private var targetIcon: String {
@@ -123,7 +123,7 @@ struct NewTaskView: View {
     private var composer: some View {
         ThreadComposerBar(
             prompt: $prompt,
-            placeholder: appModel.localized("发送第一条消息", "Send the first message"),
+            placeholder: appModel.localized("new_task.placeholder"),
             attachments: pendingAttachments,
             isSending: isSubmitting,
             isPromptFocused: $isPromptFocused,

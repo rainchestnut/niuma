@@ -83,7 +83,7 @@ extension AppModel {
         guard let identity, let selectedAgent else { return }
         guard let thread = threadSummary(for: threadID) else {
             logger.warning("thread_refresh_missing_summary thread_id=\(threadID, privacy: .public)")
-            pendingError = "未找到可刷新的会话详情"
+            pendingError = localized("thread_refresh.error.missing_summary")
             return
         }
         guard !refreshStatus(for: thread.threadID).isRefreshing else {
@@ -181,7 +181,7 @@ extension AppModel {
     func finishThreadRefreshIfTimedOut(refreshID: String, threadID: String) {
         let status = refreshStatus(for: threadID)
         guard status.refreshID == refreshID, status.isRefreshing else { return }
-        let error = "刷新超过 300 秒未收到完成或失败事件"
+        let error = localized("thread_refresh.error.timeout")
         if finishThreadRefresh(threadID: threadID, phase: .timedOut, error: error, visibleEntries: nil) {
             runtimeState = .failed
             pendingError = error

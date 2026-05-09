@@ -38,7 +38,7 @@ struct ServerEndpointEditor: View {
                     .foregroundStyle(NiumaPalette.mutedInk)
             }
 
-            Button(appModel.isUpdatingServerBaseURL ? appModel.localized("应用中…", "Applying…") : appModel.localized("应用服务地址", "Apply Server Address")) {
+            Button(appModel.isUpdatingServerBaseURL ? appModel.localized("settings.server.applying") : appModel.localized("settings.server.apply")) {
                 Task { await applyDraft() }
             }
             .buttonStyle(NiumaPrimaryButtonStyle())
@@ -62,6 +62,6 @@ struct ServerEndpointEditor: View {
         }
         draft = appModel.serverBaseURLText
         isFocused = false
-        statusMessage = appModel.localized("服务地址已应用。", "Server address applied.")
+        statusMessage = appModel.localized("settings.server.applied")
     }
 }
