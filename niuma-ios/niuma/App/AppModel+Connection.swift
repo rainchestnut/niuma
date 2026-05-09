@@ -64,10 +64,14 @@ extension AppModel {
                     }
                 } catch {
                     if !Task.isCancelled {
-                        await failActiveRefreshes(error: "实时连接中断，刷新未完成")
+                        let isTransientDisconnect = isTransientRealtimeDisconnect(error)
+                        await failActiveRefreshes(
+                            error: "实时连接中断，刷新未完成",
+                            presentsAlert: !isTransientDisconnect
+                        )
                         connectionState = .degraded
                         updateAgentOnline(agentID: agentID, isOnline: false)
-                        if !isTransientRealtimeDisconnect(error) {
+                        if !isTransientDisconnect {
                             pendingError = error.localizedDescription
                         }
                     }
@@ -75,7 +79,9 @@ extension AppModel {
             }
         } catch {
             connectionState = .degraded
-            pendingError = error.localizedDescription
+            if !isTransientRealtimeDisconnect(error) {
+                pendingError = error.localizedDescription
+            }
         }
     }
 
@@ -126,7 +132,17 @@ extension AppModel {
         let nsError = error as NSError
         if nsError.domain == NSURLErrorDomain {
             switch URLError.Code(rawValue: nsError.code) {
-            case .networkConnectionLost, .notConnectedToInternet, .cancelled:
+            case .networkConnectionLost, .notConnectedToInternet, .cancelled, .timedOut:
+                return true
+            default:
+                break
+            }
+        }
+        if nsError.domain == NSPOSIXErrorDomain {
+            // Darwin POSIX socket errors commonly surfaced by URLSession after
+            // iOS suspends a WebSocket while the device is locked.
+            switch nsError.code {
+            case 32, 53, 54, 57, 60:
                 return true
             default:
                 break
@@ -135,8 +151,16 @@ extension AppModel {
         let message = error.localizedDescription.lowercased()
         return message.contains("socket is not connected")
             || message.contains("connection lost")
+            || message.contains("network connection was lost")
+            || message.contains("software caused connection abort")
+            || message.contains("connection abort")
+            || message.contains("connection reset")
+            || message.contains("broken pipe")
             || message.contains("cancelled")
             || message.contains("closed")
+            || message.contains("软件导致连接中止")
+            || message.contains("连接中止")
+            || message.contains("连接已中断")
     }
 
     /// Downloads an encrypted server relay transfer once and stores it for local rendering.

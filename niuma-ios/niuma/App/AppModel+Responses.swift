@@ -76,14 +76,19 @@ extension AppModel {
         do {
             sessionToken = try await authenticate(identity: identity, agent: selectedAgent)
         } catch {
-            pendingError = error.localizedDescription
+            if isTransientRealtimeDisconnect(error) {
+                connectionState = .retrying
+            } else {
+                pendingError = error.localizedDescription
+            }
             return
         }
+        connectionState = .retrying
         await ensureRealtimeConnected(
             deviceID: identity.deviceID,
             agentID: selectedAgent.agentID,
             sessionToken: sessionToken,
-            forceReconnect: connectionState != .connected
+            forceReconnect: true
         )
     }
 }

@@ -71,31 +71,83 @@ extension AppModel {
 
         logger.info("thread_refresh_start thread_id=\(thread.threadID, privacy: .public) agent_id=\(selectedAgent.agentID, privacy: .public) connection=\(String(describing: self.connectionState), privacy: .public)")
         do {
-            let controller = try requireController()
-            let sessionToken = try await authenticate(identity: identity, agent: selectedAgent)
-            controller.updateSessionToken(sessionToken)
-            await ensureRealtimeConnected(
-                deviceID: identity.deviceID,
-                agentID: selectedAgent.agentID,
-                sessionToken: sessionToken,
-                forceReconnect: connectionState != .connected
+            try await sendResumeThreadWithRealtimeRecovery(
+                thread: thread,
+                identity: identity,
+                agent: selectedAgent
             )
-            guard connectionState == .connected else {
-                logger.error("thread_refresh_not_connected thread_id=\(thread.threadID, privacy: .public) connection=\(String(describing: self.connectionState), privacy: .public)")
-                throw AppModelError.realtimeNotConnected
-            }
-            try await sendResumeThread(thread: thread)
             logger.info("thread_refresh_resume_sent thread_id=\(thread.threadID, privacy: .public)")
         } catch {
             let message = error.localizedDescription
+            let isTransientDisconnect = isTransientRealtimeDisconnect(error)
             logger.error("thread_refresh_failed thread_id=\(thread.threadID, privacy: .public) error=\(message, privacy: .public)")
-            if finishThreadRefresh(threadID: thread.threadID, phase: .failed, error: message, visibleEntries: nil) {
-                runtimeState = .failed
-                pendingError = message
+            if finishThreadRefresh(
+                threadID: thread.threadID,
+                phase: .failed,
+                error: isTransientDisconnect ? nil : message,
+                visibleEntries: nil
+            ) {
+                runtimeState = isTransientDisconnect ? .reconnecting : .failed
+                if !isTransientDisconnect {
+                    pendingError = message
+                }
             }
             controller?.disconnectRealtime()
             connectionState = .degraded
         }
+    }
+
+    /// Sends the detail refresh request and retries once when iOS is resuming
+    /// from a suspended WebSocket that still looked connected locally.
+    func sendResumeThreadWithRealtimeRecovery(
+        thread: ThreadSummary,
+        identity: LocalDeviceIdentity,
+        agent: PairedAgent
+    ) async throws {
+        do {
+            try await sendResumeThreadAfterConnecting(
+                thread: thread,
+                identity: identity,
+                agent: agent,
+                forceReconnect: connectionState != .connected
+            )
+        } catch {
+            guard isTransientRealtimeDisconnect(error) else {
+                throw error
+            }
+            logger.info("thread_refresh_transient_disconnect_retry thread_id=\(thread.threadID, privacy: .public)")
+            controller?.disconnectRealtime()
+            connectionState = .retrying
+            try await sendResumeThreadAfterConnecting(
+                thread: thread,
+                identity: identity,
+                agent: agent,
+                forceReconnect: true
+            )
+        }
+    }
+
+    /// Authenticates, ensures a live realtime socket, and sends one resume request.
+    func sendResumeThreadAfterConnecting(
+        thread: ThreadSummary,
+        identity: LocalDeviceIdentity,
+        agent: PairedAgent,
+        forceReconnect: Bool
+    ) async throws {
+        let controller = try requireController()
+        let sessionToken = try await authenticate(identity: identity, agent: agent)
+        controller.updateSessionToken(sessionToken)
+        await ensureRealtimeConnected(
+            deviceID: identity.deviceID,
+            agentID: agent.agentID,
+            sessionToken: sessionToken,
+            forceReconnect: forceReconnect
+        )
+        guard connectionState == .connected else {
+            logger.error("thread_refresh_not_connected thread_id=\(thread.threadID, privacy: .public) connection=\(String(describing: self.connectionState), privacy: .public)")
+            throw AppModelError.realtimeNotConnected
+        }
+        try await sendResumeThread(thread: thread)
     }
 
     /// Sends the current detail cursor/checkpoint to the desktop gateway.
@@ -221,7 +273,7 @@ extension AppModel {
     }
 
     /// Converts transport-level interruptions into terminal refresh UI states.
-    func failActiveRefreshes(error: String) async {
+    func failActiveRefreshes(error: String, presentsAlert: Bool = true) async {
         let activeThreadIDs = threadRefreshStates.compactMap { threadID, status in
             status.isRefreshing ? threadID : nil
         }
@@ -230,6 +282,8 @@ extension AppModel {
             _ = finishThreadRefresh(threadID: threadID, phase: .failed, error: error, visibleEntries: nil)
         }
         runtimeState = .failed
-        pendingError = error
+        if presentsAlert {
+            pendingError = error
+        }
     }
 }
