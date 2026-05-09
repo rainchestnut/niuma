@@ -116,14 +116,6 @@ impl CodexWorkspaceStore {
             .find(|project| project.cwd.as_deref() == Some(normalized_cwd.as_str()))
     }
 
-    /// Return the first active Codex workspace, matching desktop display order.
-    pub fn active_project(&self) -> Option<ProjectSummary> {
-        let state = self.read_state();
-        let active_root = state.active_workspace_roots.first()?;
-        let active_id = project_id_for_root(&normalize_root(active_root));
-        self.project_for_id(&active_id)
-    }
-
     /// Return Codex desktop's explicit conversation ids that have no project.
     pub fn list_projectless_thread_ids(&self) -> Vec<String> {
         self.read_state()
@@ -303,14 +295,14 @@ pub fn snapshot_wire_messages(snapshot: &MetadataSnapshot) -> Vec<Value> {
 /// Convert one projected Codex thread into the single mobile sync message.
 pub fn thread_metadata_wire_messages(thread: &CodexThreadRecord) -> Vec<Value> {
     vec![json!({
-            "kind": "thread_sync",
-            "thread_id": thread.thread_id,
-            "project_id": thread.project_id,
-            "title": thread.title,
-            "status": thread.status,
-            "last_checkpoint_seen": thread.last_checkpoint_seen,
-            "updated_at": thread.updated_at,
-        })]
+        "kind": "thread_sync",
+        "thread_id": thread.thread_id,
+        "project_id": thread.project_id,
+        "title": thread.title,
+        "status": thread.status,
+        "last_checkpoint_seen": thread.last_checkpoint_seen,
+        "updated_at": thread.updated_at,
+    })]
 }
 
 fn project_thread(
@@ -447,13 +439,6 @@ fn unix_timestamp() -> f64 {
 
 fn home_dir() -> Option<PathBuf> {
     std::env::var_os("HOME").map(PathBuf::from)
-}
-
-pub fn home_cwd() -> String {
-    home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .to_string_lossy()
-        .into_owned()
 }
 
 #[cfg(test)]

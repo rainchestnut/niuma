@@ -202,7 +202,7 @@ struct ThreadView: View {
             .padding(.horizontal, 18)
             .padding(.top, 10)
             .padding(.bottom, 12)
-            .background(topFade)
+            .background(ThreadTopFade())
         }
     }
 
@@ -269,112 +269,23 @@ struct ThreadView: View {
     }
 
     private var composer: some View {
-        VStack(spacing: 8) {
-            HStack(spacing: 8) {
-                if appModel.availableModels.isEmpty {
-                    ComposerPill(title: appModel.displayedModelID)
-                } else {
-                    Menu {
-                        ForEach(appModel.availableModels, id: \.self) { modelID in
-                            Button {
-                                appModel.selectModel(modelID)
-                            } label: {
-                                if appModel.selectedModelID == modelID {
-                                    Label(modelID, systemImage: "checkmark")
-                                } else {
-                                    Text(modelID)
-                                }
-                            }
-                        }
-                    } label: {
-                        ComposerPill(title: appModel.displayedModelID)
-                    }
-                    .buttonStyle(.plain)
-                }
-                ComposerPill(title: "高思考")
-                Spacer()
-            }
-
-            if !pendingAttachments.isEmpty {
-                ComposerAttachmentStrip(attachments: pendingAttachments) { attachment in
-                    pendingAttachments.removeAll { $0.id == attachment.id }
-                }
-            }
-
-            HStack(spacing: 10) {
-                Button {
-                    isShowingAttachmentOptions = true
-                } label: {
-                    Image(systemName: "plus")
-                        .font(.system(size: 17, weight: .medium))
-                        .foregroundStyle(NiumaPalette.ink)
-                        .frame(width: 34, height: 34)
-                        .contentShape(Circle())
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel("添加附件")
-                .accessibilityIdentifier("thread-attachment-button")
-
-                HStack(alignment: .bottom, spacing: 10) {
-                    TextField("给“\(session.title)”发送消息", text: $prompt, axis: .vertical)
-                        .font(.callout)
-                        .foregroundStyle(NiumaPalette.ink)
-                        .textFieldStyle(.plain)
-                        .lineLimit(1...4)
-                        .submitLabel(.send)
-                        .focused($isPromptFocused)
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
-                        .onSubmit {
-                            sendPrompt()
-                        }
-                        .padding(.vertical, 3)
-                        .contentShape(Rectangle())
-                        .onTapGesture {
-                            isPromptFocused = true
-                        }
-                        .layoutPriority(1)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .accessibilityLabel("消息输入")
-                        .accessibilityIdentifier("thread-prompt-field")
-
-                    Button {
-                    } label: {
-                        Image(systemName: "mic")
-                            .font(.system(size: 17, weight: .medium))
-                            .foregroundStyle(NiumaPalette.mutedInk)
-                            .frame(width: 30, height: 30)
-                    }
-                    .buttonStyle(.plain)
-
-                    Button {
-                        sendPrompt()
-                    } label: {
-                        Image(systemName: "arrow.up")
-                            .font(.system(size: 16, weight: .bold))
-                            .foregroundStyle(.white)
-                            .frame(width: 34, height: 34)
-                            .background(Circle().fill(.black))
-                            .contentShape(Circle())
-                    }
-                    .buttonStyle(.plain)
-                    .disabled(!canSend)
-                    .opacity(canSend ? 1 : 0.45)
-                    .accessibilityLabel("发送")
-                    .accessibilityIdentifier("thread-send-button")
-                }
-            }
-            .padding(.horizontal, 14)
-            .padding(.vertical, 8)
-            .niumaGlassChrome(cornerRadius: 28)
-        }
-        .padding(.horizontal, 12)
-        .padding(.top, 8)
-        .padding(.bottom, 10)
-        .background(bottomFade)
+        ThreadComposerBar(
+            prompt: $prompt,
+            placeholder: "给“\(session.title)”发送消息",
+            attachments: pendingAttachments,
+            isSending: false,
+            isPromptFocused: $isPromptFocused,
+            onAddAttachment: {
+                isShowingAttachmentOptions = true
+            },
+            onRemoveAttachment: { attachment in
+                pendingAttachments.removeAll { $0.id == attachment.id }
+            },
+            onSend: sendPrompt
+        )
     }
 
-    /// Sends Prompt.
+    /// Sends the current composer payload into this existing thread.
     private func sendPrompt() {
         let text = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty || !pendingAttachments.isEmpty else { return }
@@ -393,30 +304,14 @@ struct ThreadView: View {
         }
     }
 
-    private var canSend: Bool {
-        !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !pendingAttachments.isEmpty
-    }
-
     private func loadPhotoAttachment(_ item: PhotosPickerItem) async {
         defer { selectedPhotoItem = nil }
         do {
-            guard let data = try await item.loadTransferable(type: Data.self) else { return }
-            let type = item.supportedContentTypes.first(where: {
-                $0.conforms(to: .movie) || $0.conforms(to: .image)
-            }) ?? .jpeg
-            let ext = type.preferredFilenameExtension ?? "jpg"
-            let isVideo = type.conforms(to: .movie)
-            let fileName = "\(isVideo ? "video" : "image")-\(pendingAttachments.count + 1).\(ext)"
-            let fileType = isVideo ? "video" : "image"
-            pendingAttachments.append(
-                OutgoingAttachment(
-                    fileType: fileType,
-                    fileName: fileName,
-                    mimeType: type.preferredMIMEType ?? (isVideo ? "video/quicktime" : "image/jpeg"),
-                    data: data,
-                    alt: fileName
-                )
-            )
+            guard let attachment = try await ThreadAttachmentLoader.photoAttachment(
+                from: item,
+                nextIndex: pendingAttachments.count + 1
+            ) else { return }
+            pendingAttachments.append(attachment)
         } catch {
             appModel.pendingError = error.localizedDescription
         }
@@ -435,80 +330,11 @@ struct ThreadView: View {
     private func loadFileAttachments(_ urls: [URL]) async {
         for url in urls {
             do {
-                let hasAccess = url.startAccessingSecurityScopedResource()
-                defer {
-                    if hasAccess {
-                        url.stopAccessingSecurityScopedResource()
-                    }
-                }
-                let data = try Data(contentsOf: url)
-                let resourceValues = try? url.resourceValues(forKeys: [.contentTypeKey])
-                let type = resourceValues?.contentType ?? UTType(filenameExtension: url.pathExtension) ?? .data
-                let fileType = attachmentFileType(for: type)
-                pendingAttachments.append(
-                    OutgoingAttachment(
-                        fileType: fileType,
-                        fileName: url.lastPathComponent.isEmpty ? "attachment" : url.lastPathComponent,
-                        mimeType: type.preferredMIMEType ?? "application/octet-stream",
-                        data: data,
-                        alt: url.lastPathComponent
-                    )
-                )
+                pendingAttachments.append(try ThreadAttachmentLoader.fileAttachment(from: url))
             } catch {
                 appModel.pendingError = error.localizedDescription
             }
         }
-    }
-
-    /// Maps a selected file type to the broad transfer file category.
-    private func attachmentFileType(for type: UTType) -> String {
-        if type.conforms(to: .movie) {
-            return "video"
-        }
-        if type.conforms(to: .image) {
-            return "image"
-        }
-        return "file"
-    }
-
-    private var topFade: some View {
-        ZStack {
-            Rectangle()
-                .fill(.ultraThinMaterial)
-                .mask(
-                    LinearGradient(
-                        colors: [.white, .white.opacity(0.9), .clear],
-                        startPoint: .top,
-                        endPoint: .bottom
-                    )
-                )
-            LinearGradient(
-                colors: [NiumaPalette.canvas.opacity(0.24), NiumaPalette.canvas.opacity(0.10), .clear],
-                startPoint: .top,
-                endPoint: .bottom
-            )
-        }
-        .ignoresSafeArea(edges: .top)
-    }
-
-    private var bottomFade: some View {
-        ZStack {
-            Rectangle()
-                .fill(.ultraThinMaterial)
-                .mask(
-                    LinearGradient(
-                        colors: [.clear, .white.opacity(0.78), .white],
-                        startPoint: .top,
-                        endPoint: .bottom
-                    )
-                )
-            LinearGradient(
-                colors: [.clear, NiumaPalette.canvas.opacity(0.10), NiumaPalette.canvas.opacity(0.22)],
-                startPoint: .top,
-                endPoint: .bottom
-            )
-        }
-        .ignoresSafeArea(edges: .bottom)
     }
 
     private func loadInitialDetailsIfNeeded() async {

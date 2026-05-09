@@ -327,7 +327,7 @@ private struct FileChangeSummaryCard: View {
     }
 }
 
-private struct FileChangeDetailSheet: View {
+struct FileChangeDetailSheet: View {
     @Environment(\.dismiss) private var dismiss
 
     let part: ContentPart

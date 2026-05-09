@@ -139,6 +139,10 @@ struct TaskStartRequestData: Encodable {
     let prompt: String
     let contentParts: [ContentPart]?
     let model: String?
+    let effort: String?
+    let approvalPolicy: String?
+    let approvalsReviewer: String?
+    let sandboxMode: String?
 }
 
 struct MetadataRefreshRequestData: Encodable {
@@ -184,6 +188,7 @@ struct ApprovalDecisionRequestData: Encodable {
     let agentEncryptionPublicKey: String
     let approvalID: String
     let decision: ApprovalDecision
+    let grantScope: ApprovalGrantScope?
 }
 
 struct UserInputResponseRequestData: Encodable {

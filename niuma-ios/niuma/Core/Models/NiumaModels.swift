@@ -40,6 +40,55 @@ nonisolated enum ThreadRuntimeState: String, Codable {
     case failed
 }
 
+/// Reasoning effort values exposed by mobile for Codex `turn/start`.
+nonisolated enum ReasoningEffort: String, Codable, CaseIterable, Identifiable {
+    case low
+    case medium
+    case high
+    case xhigh
+
+    var id: String { rawValue }
+}
+
+/// Mobile-facing presets for Codex approval and sandbox settings.
+nonisolated enum ApprovalPermissionPreset: String, Codable, CaseIterable, Identifiable {
+    case defaultPermissions
+    case autoReview
+    case fullAccess
+    case custom
+
+    var id: String { rawValue }
+}
+
+nonisolated enum CodexApprovalPolicy: String, Codable, CaseIterable, Identifiable {
+    case untrusted
+    case onRequest = "on-request"
+    case never
+
+    var id: String { rawValue }
+}
+
+nonisolated enum CodexApprovalsReviewer: String, Codable, CaseIterable, Identifiable {
+    case user
+    case guardianSubagent = "guardian_subagent"
+
+    var id: String { rawValue }
+}
+
+nonisolated enum CodexSandboxMode: String, Codable, CaseIterable, Identifiable {
+    case readOnly = "read-only"
+    case workspaceWrite = "workspace-write"
+    case dangerFullAccess = "danger-full-access"
+
+    var id: String { rawValue }
+}
+
+nonisolated struct ApprovalPermissionOverrides: Codable, Hashable {
+    let approvalPolicy: CodexApprovalPolicy?
+    let approvalsReviewer: CodexApprovalsReviewer?
+    let sandboxMode: CodexSandboxMode?
+}
+
 /// Thread lifecycle values accepted from both Niuma and Codex App Server projections.
 nonisolated enum ThreadStatus: String, Codable, CaseIterable {
     case notLoaded
@@ -85,6 +134,34 @@ nonisolated enum ThreadEntryRole: String, Codable {
 nonisolated enum ApprovalDecision: String, Codable {
     case allow
     case reject
+}
+
+nonisolated enum ApprovalGrantScopeKind: String, Codable {
+    case turn
+    case session
+}
+
+nonisolated struct ApprovalGrantScope: Codable, Hashable {
+    let scope: ApprovalGrantScopeKind
+    let threadID: String?
+    let approvalType: String?
+    let ttlSeconds: Int?
+
+    enum CodingKeys: String, CodingKey {
+        case scope
+        case threadID = "thread_id"
+        case approvalType = "approval_type"
+        case ttlSeconds = "ttl_seconds"
+    }
+
+    static func session(threadID: String, approvalType: String) -> ApprovalGrantScope {
+        ApprovalGrantScope(
+            scope: .session,
+            threadID: threadID,
+            approvalType: approvalType,
+            ttlSeconds: nil
+        )
+    }
 }
 
 /// Direction of an encrypted temporary file transfer through niuma-server.

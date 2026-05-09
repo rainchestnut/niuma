@@ -82,8 +82,9 @@
 
 - 展示审批入口
 - 拉取审批详情
-- 发出 allow / reject
+- 发出本次 allow、会话级 allow 或 reject
 - 支持 scoped grant 选项
+- 在 session 详情选择默认权限、自动审查、完全访问或自定义权限模式
 
 ### 4.7 Crypto Layer
 
@@ -322,10 +323,15 @@
 | `ciphertext` | string | 是 | 加密后的任务正文 |
 | `signature` | string | 是 | 设备签名 |
 | `model` | string | 否 | 当前选择的 Codex 模型 |
+| `effort` | string | 否 | 当前选择的推理强度 |
+| `approval_policy` | string | 否 | 移动端权限模式映射出的 Codex 审批策略 |
+| `approvals_reviewer` | string | 否 | 移动端权限模式映射出的审批审查人 |
+| `sandbox_mode` | string | 否 | 移动端权限模式映射出的 sandbox 模式 |
 
 说明：
 
 - 移动端不生成 canonical message id，也不创建本地 session 或把本地临时发送态作为持久消息保存。
+- 默认权限模式不发送以上三个权限覆盖字段，保持桌面 Codex 配置为准。
 
 ### 8.4 WebSocket `resume_thread`
 
@@ -381,6 +387,7 @@
 | `approval_id` | string | 是 | 审批 ID |
 | `decision` | string | 是 | `allow` 或 `reject` |
 | `grant_scope` | object | 否 | scoped grant 配置 |
+| `grant_scope.scope` | string | 否 | `turn` 或 `session` |
 | `grant_scope.thread_id` | string | 否 | 生效 thread |
 | `grant_scope.approval_type` | string | 否 | 审批类型 |
 | `grant_scope.ttl_seconds` | integer | 否 | 授权有效期 |

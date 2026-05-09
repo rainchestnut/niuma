@@ -80,6 +80,12 @@ extension AppModel {
         storage.set(modelID, forKey: StorageKey.selectedModelID.rawValue)
     }
 
+    /// Persists the reasoning effort selected from the shared composer menu.
+    func selectReasoningEffort(_ effort: ReasoningEffort) {
+        selectedReasoningEffort = effort
+        storage.set(effort.rawValue, forKey: StorageKey.selectedReasoningEffort.rawValue)
+    }
+
     /// Applies the desktop app-server model list and current model to mobile state.
     func applyModelSync(_ state: ModelSyncState) {
         availableModels = state.availableModels

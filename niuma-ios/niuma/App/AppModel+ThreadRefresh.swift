@@ -33,6 +33,27 @@ extension AppModel {
         }
     }
 
+    /// Ensures the branch-change diff bundle referenced by a result is available for local detail rendering.
+    func ensureBranchChangeBundleDownloaded(_ result: BranchChangesResult) async {
+        guard result.succeeded,
+              let transferID = result.transferID,
+              localAttachmentData(forTransferID: transferID) == nil,
+              let identity,
+              let selectedAgent else {
+            return
+        }
+        await receiveTransferIfNeeded(
+            TransferReady(
+                transferID: transferID,
+                direction: .agentToIOS,
+                sourceDeviceID: selectedAgent.agentID,
+                targetDeviceID: identity.deviceID,
+                encryptedSizeBytes: result.sizeBytes ?? 0,
+                expiresAt: 0
+            )
+        )
+    }
+
     func refreshThreadDetails(threadID: String) async {
         guard let identity, let selectedAgent else { return }
         guard let thread = threadSummary(for: threadID) else {

@@ -183,17 +183,16 @@ impl CodexAppServerClient {
             .context("thread/read response missing thread")
     }
 
-    /// Start a new Codex thread in a concrete working directory.
-    pub async fn start_thread_payload(&self, cwd: &str) -> Result<Value> {
-        let result = self
-            .request(
-                "thread/start",
-                json!({
-                    "cwd": cwd,
-                    "serviceName": "niuma-cli",
-                }),
-            )
-            .await?;
+    /// Start a new Codex thread, optionally binding it to a workspace cwd.
+    pub async fn start_thread_payload(
+        &self,
+        cwd: Option<&str>,
+        approval_policy: Option<&str>,
+        approvals_reviewer: Option<&str>,
+        sandbox_mode: Option<&str>,
+    ) -> Result<Value> {
+        let params = thread_start_params(cwd, approval_policy, approvals_reviewer, sandbox_mode);
+        let result = self.request("thread/start", params).await?;
         result
             .get("thread")
             .cloned()
@@ -201,11 +200,21 @@ impl CodexAppServerClient {
     }
 
     /// Resume an existing Codex thread before starting a new turn or replay.
-    pub async fn resume_thread_payload(&self, thread_id: &str, cwd: Option<&str>) -> Result<Value> {
-        let mut params = json!({ "threadId": thread_id });
-        if let Some(cwd) = cwd {
-            params["cwd"] = json!(cwd);
-        }
+    pub async fn resume_thread_payload(
+        &self,
+        thread_id: &str,
+        cwd: Option<&str>,
+        approval_policy: Option<&str>,
+        approvals_reviewer: Option<&str>,
+        sandbox_mode: Option<&str>,
+    ) -> Result<Value> {
+        let params = thread_resume_params(
+            thread_id,
+            cwd,
+            approval_policy,
+            approvals_reviewer,
+            sandbox_mode,
+        );
         let result = self.request("thread/resume", params).await?;
         result
             .get("thread")
@@ -219,14 +228,20 @@ impl CodexAppServerClient {
         thread_id: &str,
         input_items: Vec<Value>,
         model: Option<&str>,
+        effort: Option<&str>,
+        approval_policy: Option<&str>,
+        approvals_reviewer: Option<&str>,
+        sandbox_mode: Option<&str>,
     ) -> Result<Value> {
-        let mut params = json!({
-            "threadId": thread_id,
-            "input": input_items,
-        });
-        if let Some(model) = model {
-            params["model"] = json!(model);
-        }
+        let params = turn_start_params(
+            thread_id,
+            input_items,
+            model,
+            effort,
+            approval_policy,
+            approvals_reviewer,
+            sandbox_mode,
+        );
         let result = self.request("turn/start", params).await?;
         result
             .get("turn")
@@ -396,10 +411,173 @@ fn push_model_id(models: &mut Vec<String>, model: &str) {
     }
 }
 
+fn turn_start_params(
+    thread_id: &str,
+    input_items: Vec<Value>,
+    model: Option<&str>,
+    effort: Option<&str>,
+    approval_policy: Option<&str>,
+    approvals_reviewer: Option<&str>,
+    sandbox_mode: Option<&str>,
+) -> Value {
+    let mut params = json!({
+        "threadId": thread_id,
+        "input": input_items,
+    });
+    if let Some(model) = model {
+        params["model"] = json!(model);
+    }
+    if let Some(effort) = effort {
+        params["effort"] = json!(effort);
+    }
+    apply_approval_overrides(
+        &mut params,
+        approval_policy,
+        approvals_reviewer,
+        sandbox_mode,
+        SandboxOverrideShape::TurnStart,
+    );
+    params
+}
+
+fn thread_start_params(
+    cwd: Option<&str>,
+    approval_policy: Option<&str>,
+    approvals_reviewer: Option<&str>,
+    sandbox_mode: Option<&str>,
+) -> Value {
+    let mut params = json!({
+        "serviceName": "niuma-cli",
+    });
+    if let Some(cwd) = cwd {
+        params["cwd"] = json!(cwd);
+    }
+    apply_approval_overrides(
+        &mut params,
+        approval_policy,
+        approvals_reviewer,
+        sandbox_mode,
+        SandboxOverrideShape::ThreadStartOrResume,
+    );
+    params
+}
+
+fn thread_resume_params(
+    thread_id: &str,
+    cwd: Option<&str>,
+    approval_policy: Option<&str>,
+    approvals_reviewer: Option<&str>,
+    sandbox_mode: Option<&str>,
+) -> Value {
+    let mut params = json!({ "threadId": thread_id });
+    if let Some(cwd) = cwd {
+        params["cwd"] = json!(cwd);
+    }
+    apply_approval_overrides(
+        &mut params,
+        approval_policy,
+        approvals_reviewer,
+        sandbox_mode,
+        SandboxOverrideShape::ThreadStartOrResume,
+    );
+    params
+}
+
+#[derive(Debug, Clone, Copy)]
+enum SandboxOverrideShape {
+    ThreadStartOrResume,
+    TurnStart,
+}
+
+fn apply_approval_overrides(
+    params: &mut Value,
+    approval_policy: Option<&str>,
+    approvals_reviewer: Option<&str>,
+    sandbox_mode: Option<&str>,
+    sandbox_shape: SandboxOverrideShape,
+) {
+    if let Some(approval_policy) = approval_policy {
+        params["approvalPolicy"] = json!(approval_policy);
+    }
+    if let Some(approvals_reviewer) = approvals_reviewer {
+        params["approvalsReviewer"] = json!(approvals_reviewer);
+    }
+    if let Some(sandbox_mode) = sandbox_mode {
+        match sandbox_shape {
+            SandboxOverrideShape::ThreadStartOrResume => {
+                params["sandbox"] = json!(sandbox_mode);
+            }
+            SandboxOverrideShape::TurnStart => {
+                params["sandboxPolicy"] = sandbox_policy_for_mode(sandbox_mode);
+            }
+        }
+    }
+}
+
+fn sandbox_policy_for_mode(mode: &str) -> Value {
+    match mode {
+        "read-only" => json!({ "type": "readOnly" }),
+        "workspace-write" => json!({ "type": "workspaceWrite" }),
+        "danger-full-access" => json!({ "type": "dangerFullAccess" }),
+        other => json!({ "type": other }),
+    }
+}
+
 fn string_field(payload: &Value, key: &str) -> Option<String> {
     payload
         .get(key)
         .and_then(Value::as_str)
         .filter(|value| !value.is_empty())
         .map(str::to_string)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn turn_start_params_include_model_and_effort_overrides() {
+        let params = turn_start_params(
+            "thread-1",
+            vec![json!({ "type": "text", "text": "hello" })],
+            Some("gpt-5.5"),
+            Some("xhigh"),
+            None,
+            None,
+            None,
+        );
+
+        assert_eq!(params["threadId"], "thread-1");
+        assert_eq!(params["model"], "gpt-5.5");
+        assert_eq!(params["effort"], "xhigh");
+        assert_eq!(params["input"][0]["text"], "hello");
+    }
+
+    #[test]
+    fn mobile_permission_overrides_map_to_app_server_params() {
+        let turn = turn_start_params(
+            "thread-1",
+            vec![json!({ "type": "text", "text": "hello" })],
+            None,
+            None,
+            Some("on-request"),
+            Some("guardian_subagent"),
+            Some("workspace-write"),
+        );
+
+        assert_eq!(turn["approvalPolicy"], "on-request");
+        assert_eq!(turn["approvalsReviewer"], "guardian_subagent");
+        assert_eq!(turn["sandboxPolicy"]["type"], "workspaceWrite");
+
+        let thread = thread_start_params(
+            Some("/tmp/workspace"),
+            Some("never"),
+            None,
+            Some("danger-full-access"),
+        );
+
+        assert_eq!(thread["approvalPolicy"], "never");
+        assert_eq!(thread["sandbox"], "danger-full-access");
+        assert_eq!(thread["cwd"], "/tmp/workspace");
+    }
 }

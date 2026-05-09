@@ -26,6 +26,10 @@ nonisolated struct LiveTaskStartMessage: Encodable {
     let ciphertext: String
     let signature: String
     let model: String?
+    let effort: String?
+    let approvalPolicy: String?
+    let approvalsReviewer: String?
+    let sandboxMode: String?
 
     enum CodingKeys: String, CodingKey {
         case kind
@@ -36,6 +40,10 @@ nonisolated struct LiveTaskStartMessage: Encodable {
         case ciphertext
         case signature
         case model
+        case effort
+        case approvalPolicy = "approval_policy"
+        case approvalsReviewer = "approvals_reviewer"
+        case sandboxMode = "sandbox_mode"
     }
 }
 
@@ -302,7 +310,7 @@ nonisolated struct LiveUserInputAnswerMessage: Codable {
 nonisolated struct ApprovalResponsePlaintext: Encodable {
     let approvalID: String
     let decision: String
-    let grantScope: [String: String]?
+    let grantScope: ApprovalGrantScope?
 
     enum CodingKeys: String, CodingKey {
         case approvalID = "approval_id"

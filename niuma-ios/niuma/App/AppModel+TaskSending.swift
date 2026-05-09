@@ -27,12 +27,16 @@ extension AppModel {
     }
 
     /// Sends the first prompt for a new desktop Codex task and lets Codex mint the thread id.
-    func startNewTask(projectID: String, prompt: String) async throws {
+    func startNewTask(
+        projectID: String,
+        prompt: String,
+        attachments: [OutgoingAttachment] = []
+    ) async throws {
         let normalizedPrompt = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !projectID.isEmpty else {
             throw AppModelError.missingProjectSelection
         }
-        guard !normalizedPrompt.isEmpty else {
+        guard !normalizedPrompt.isEmpty || !attachments.isEmpty else {
             throw AppModelError.missingPrompt
         }
 
@@ -40,7 +44,7 @@ extension AppModel {
             projectID: projectID,
             threadID: nil,
             prompt: normalizedPrompt,
-            attachments: []
+            attachments: attachments
         )
     }
 
@@ -62,6 +66,7 @@ extension AppModel {
             agent: selectedAgent,
             sessionToken: sessionToken
         )
+        let permissionOverrides = approvalPermissionOverrides()
         let transientThreadID: String?
         let transientEntryID: String?
         if let threadID {
@@ -91,7 +96,11 @@ extension AppModel {
                         threadID: threadID,
                         prompt: prompt,
                         contentParts: contentParts,
-                        model: self.selectedModelID
+                        model: self.selectedModelID,
+                        effort: self.selectedReasoningEffort.rawValue,
+                        approvalPolicy: permissionOverrides.approvalPolicy?.rawValue,
+                        approvalsReviewer: permissionOverrides.approvalsReviewer?.rawValue,
+                        sandboxMode: permissionOverrides.sandboxMode?.rawValue
                     )
                 )
             }

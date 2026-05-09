@@ -3,6 +3,11 @@ import Foundation
 
 enum StorageKey: String {
     case selectedModelID
+    case selectedReasoningEffort
+    case approvalPermissionPreset
+    case customApprovalPolicy
+    case customApprovalsReviewer
+    case customSandboxMode
     case appLanguage
     case appTheme
     case serverBaseURL

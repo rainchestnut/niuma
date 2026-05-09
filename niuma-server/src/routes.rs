@@ -593,6 +593,11 @@ async fn handle_mobile_text(
             payload["source"] = json!("mobile");
             route_to_agent_or_error(state, tx, &query.agent_id, payload, request_id).await
         }
+        "branch_changes_request" => {
+            payload["device_id"] = json!(query.device_id);
+            payload["source"] = json!("mobile");
+            route_to_agent_or_error(state, tx, &query.agent_id, payload, None).await
+        }
         "approval_response" | "user_input_response" => {
             payload["device_id"] = json!(query.device_id);
             payload["source"] = json!("mobile");
@@ -685,27 +690,11 @@ async fn handle_agent_text(
         | "thread_sync_failed"
         | "metadata_refresh_completed"
         | "metadata_refresh_failed"
+        | "branch_changes_result"
+        | "branch_changes_failed"
         | "approval_request"
         | "user_input_request" => {
-            let device_id = value_str_ws(&payload, "device_id")?.to_string();
-            payload["source"] = json!("agent");
-            payload["agent_id"] = json!(agent_id);
-            let delivered = state
-                .hub
-                .send_to_mobile(&device_id, payload, Some(agent_id))
-                .await;
-            tracing::info!(
-                agent_id = %agent_id,
-                device_id = %device_id,
-                kind = %kind,
-                delivered,
-                "ws_route_to_mobile"
-            );
-            if delivered {
-                Ok(())
-            } else {
-                Err("target mobile websocket is not connected".to_string())
-            }
+            deliver_agent_payload_to_mobile(state, agent_id, &kind, payload).await
         }
         "task_progress_push" => handle_task_progress_push(state, agent_id, &payload).await,
         "transfer_ready" => {
@@ -716,6 +705,32 @@ async fn handle_agent_text(
         }
         _ => Err(format!("unsupported agent message kind={kind}")),
     }
+}
+
+async fn deliver_agent_payload_to_mobile(
+    state: &AppState,
+    agent_id: &str,
+    kind: &str,
+    mut payload: Value,
+) -> Result<(), String> {
+    let device_id = value_str_ws(&payload, "device_id")?.to_string();
+    payload["source"] = json!("agent");
+    payload["agent_id"] = json!(agent_id);
+    let delivered = state
+        .hub
+        .send_to_mobile(&device_id, payload, Some(agent_id))
+        .await;
+    tracing::info!(
+        agent_id = %agent_id,
+        device_id = %device_id,
+        kind,
+        delivered,
+        "ws_route_to_mobile"
+    );
+    // Mobile WebSocket delivery is the server->mobile channel. A missing mobile
+    // connection is expected when iOS is locked or offline and must not break
+    // the independent gateway->server channel that may carry the APNs trigger.
+    Ok(())
 }
 
 async fn handle_task_progress_push(
@@ -854,4 +869,198 @@ struct AgentWsQuery {
 #[derive(Debug, Deserialize)]
 struct TransferDownloadQuery {
     device_id: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        apns::ApnsPushService, config::Settings, hub::ConnectionHub, transfer::TransferStore,
+    };
+    use sqlx::postgres::PgPoolOptions;
+    use std::{sync::Arc, time::Duration};
+    use tokio::sync::mpsc;
+
+    fn test_settings() -> Settings {
+        Settings {
+            host: "127.0.0.1".to_string(),
+            port: 8000,
+            app_env: "test".to_string(),
+            log_level: "info".to_string(),
+            database_url: "postgres://localhost/niuma_test".to_string(),
+            database_pool_size: 1,
+            database_connect_timeout: Duration::from_secs(1),
+            challenge_ttl_seconds: 120,
+            pair_token_ttl_seconds: 300,
+            session_token_ttl_seconds: 3600,
+            nonce_ttl_seconds: 600,
+            auth_timestamp_tolerance_seconds: 120,
+            pair_token_max_attempts: 5,
+            transfer_storage_dir: std::env::temp_dir()
+                .join(format!("niuma-routes-test-{}", crypto::random_token(8))),
+            transfer_ttl_seconds: 1800,
+            transfer_max_encrypted_bytes: 1024,
+            apns_key_id: None,
+            apns_team_id: None,
+            apns_topic: None,
+            apns_auth_key_path: None,
+            apns_auth_key_pem: None,
+            apns_environment: "sandbox".to_string(),
+        }
+    }
+
+    fn test_state() -> AppState {
+        let settings = test_settings();
+        let pool = PgPoolOptions::new()
+            .connect_lazy(&settings.database_url)
+            .expect("create lazy postgres pool");
+        AppState {
+            transfers: Arc::new(TransferStore::new(&settings).expect("create transfer store")),
+            push: Arc::new(ApnsPushService::new(&settings).expect("create APNs service")),
+            settings,
+            pool,
+            hub: Arc::new(ConnectionHub::default()),
+        }
+    }
+
+    async fn recv_json(rx: &mut mpsc::UnboundedReceiver<Message>) -> Value {
+        let message = tokio::time::timeout(Duration::from_secs(1), rx.recv())
+            .await
+            .expect("receive routed websocket message")
+            .expect("message is present");
+        match message {
+            Message::Text(text) => serde_json::from_str(&text.to_string()).expect("json text"),
+            other => panic!("expected text websocket message, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn mobile_branch_changes_request_routes_to_gateway() {
+        let state = test_state();
+        let (agent_tx, mut agent_rx) = mpsc::unbounded_channel();
+        state.hub.connect_agent("agent-1", agent_tx).await;
+        let (mobile_tx, mut mobile_rx) = mpsc::unbounded_channel();
+        let query = MobileWsQuery {
+            device_id: "ios-device".to_string(),
+            agent_id: "agent-1".to_string(),
+            session_token: "session-token".to_string(),
+        };
+        let request = json!({
+            "kind": "branch_changes_request",
+            "request_id": "request-1",
+            "device_id": "spoofed-device",
+            "thread_id": "thread-1",
+            "base_ref": "main"
+        });
+
+        handle_mobile_text(&state, &query, &mobile_tx, &request.to_string())
+            .await
+            .expect("route branch changes request");
+
+        let routed = recv_json(&mut agent_rx).await;
+        assert_eq!(routed["kind"], "branch_changes_request");
+        assert_eq!(routed["request_id"], "request-1");
+        assert_eq!(routed["device_id"], "ios-device");
+        assert_eq!(routed["thread_id"], "thread-1");
+        assert_eq!(routed["base_ref"], "main");
+        assert_eq!(routed["source"], "mobile");
+        assert!(mobile_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn agent_branch_changes_result_routes_to_mobile() {
+        assert_agent_branch_changes_routes_to_mobile("branch_changes_result").await;
+    }
+
+    #[tokio::test]
+    async fn agent_branch_changes_failed_routes_to_mobile() {
+        assert_agent_branch_changes_routes_to_mobile("branch_changes_failed").await;
+    }
+
+    #[tokio::test]
+    async fn offline_mobile_delivery_does_not_fail_agent_channel() {
+        let state = test_state();
+        let (agent_tx, mut agent_rx) = mpsc::unbounded_channel();
+
+        for kind in ["task_update", "thread_sync_completed"] {
+            let message = json!({
+                "kind": kind,
+                "device_id": "ios-offline",
+                "thread_id": "thread-1",
+                "seq": 1,
+                "cursor": 1,
+                "entry_count": 1,
+                "ciphertext": "encrypted-payload"
+            });
+
+            handle_agent_text(&state, "agent-1", &agent_tx, &message.to_string())
+                .await
+                .expect("offline mobile websocket is not an agent channel failure");
+        }
+
+        assert!(agent_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn failed_mobile_delivery_prunes_b_channel_connection() {
+        let state = test_state();
+        let (mobile_tx, mobile_rx) = mpsc::unbounded_channel();
+        state
+            .hub
+            .connect_mobile("ios-stale", "agent-1", mobile_tx)
+            .await;
+        drop(mobile_rx);
+        let (agent_tx, mut agent_rx) = mpsc::unbounded_channel();
+        let message = json!({
+            "kind": "task_update",
+            "device_id": "ios-stale",
+            "thread_id": "thread-1",
+            "seq": 1,
+            "ciphertext": "encrypted-payload"
+        });
+
+        handle_agent_text(&state, "agent-1", &agent_tx, &message.to_string())
+            .await
+            .expect("stale mobile websocket is handled in the mobile channel");
+
+        assert!(agent_rx.try_recv().is_err());
+        assert!(
+            state
+                .hub
+                .connected_mobile_ids_for_agent("agent-1")
+                .await
+                .is_empty()
+        );
+    }
+
+    async fn assert_agent_branch_changes_routes_to_mobile(kind: &str) {
+        let state = test_state();
+        let (mobile_tx, mut mobile_rx) = mpsc::unbounded_channel();
+        state
+            .hub
+            .connect_mobile("ios-device", "agent-1", mobile_tx)
+            .await;
+        let (agent_tx, mut agent_rx) = mpsc::unbounded_channel();
+        let response = json!({
+            "kind": kind,
+            "device_id": "ios-device",
+            "request_id": "request-1",
+            "thread_id": "thread-1",
+            "ciphertext": "encrypted-payload"
+        });
+
+        handle_agent_text(&state, "agent-1", &agent_tx, &response.to_string())
+            .await
+            .expect("route branch changes response");
+
+        let routed = recv_json(&mut mobile_rx).await;
+        assert_eq!(routed["kind"], kind);
+        assert_eq!(routed["device_id"], "ios-device");
+        assert_eq!(routed["request_id"], "request-1");
+        assert_eq!(routed["thread_id"], "thread-1");
+        assert_eq!(routed["ciphertext"], "encrypted-payload");
+        assert_eq!(routed["source"], "agent");
+        assert_eq!(routed["agent_id"], "agent-1");
+        assert!(agent_rx.try_recv().is_err());
+    }
 }

@@ -86,6 +86,7 @@ struct ActiveThread {
     cursor: i64,
     checkpoint: Option<String>,
     project_id: Option<String>,
+    last_pushed_completion: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -382,11 +383,7 @@ where
                 writer,
                 encrypt_task_update(
                     identity,
-                    task_error_update(
-                        &device_id,
-                        &fallback_thread_id,
-                        &err.to_string(),
-                    ),
+                    task_error_update(&device_id, &fallback_thread_id, &err.to_string()),
                 )?,
             )
             .await?;
@@ -627,52 +624,114 @@ where
     let Some(active) = active_threads.read().await.get(&thread_id).cloned() else {
         return Ok(());
     };
-    let Some(app_server) = codex_app_server else {
-        return Ok(());
-    };
     let device_id = active.device_id.clone();
     let cursor = active.cursor;
     let checkpoint = active.checkpoint.clone();
-    let should_push_progress = is_task_progress_push_trigger(&notification);
-    let inbound = ResumeThreadInbound {
-        device_id: device_id.clone(),
-        thread_id: thread_id.clone(),
-        cursor,
-        checkpoint: checkpoint.clone(),
-    };
-    match TaskRuntime::new(identity.clone(), app_server, transfer_context.clone())
-        .resume_thread_messages(inbound)
-        .await
-    {
-        Ok(messages) if !messages.is_empty() => {
-            let completion = thread_sync_completed(
-                &device_id,
-                &thread_id,
-                cursor,
-                checkpoint.as_deref(),
-                &messages,
-            );
-            send_wire_messages(
-                writer,
-                identity,
-                messages,
-                active_threads,
-                transfer_context.as_ref(),
-            )
-            .await?;
-            send_wire_message(writer, completion).await?;
-            if should_push_progress {
-                send_wire_message(
+    if let Some(app_server) = codex_app_server {
+        let inbound = ResumeThreadInbound {
+            device_id: device_id.clone(),
+            thread_id: thread_id.clone(),
+            cursor,
+            checkpoint: checkpoint.clone(),
+        };
+        match TaskRuntime::new(identity.clone(), app_server, transfer_context.clone())
+            .resume_thread_messages(inbound)
+            .await
+        {
+            Ok(messages) if !messages.is_empty() => {
+                let completion = thread_sync_completed(
+                    &device_id,
+                    &thread_id,
+                    cursor,
+                    checkpoint.as_deref(),
+                    &messages,
+                );
+                send_wire_messages(
                     writer,
-                    task_progress_push_wire(identity, &device_id, &thread_id)?,
+                    identity,
+                    messages,
+                    active_threads.clone(),
+                    transfer_context.as_ref(),
                 )
                 .await?;
+                send_wire_message(writer, completion).await?;
             }
+            Ok(_) => {}
+            Err(err) => warn!("app-server notification projection failed: {err:#}"),
         }
-        Ok(_) => {}
-        Err(err) => warn!("app-server notification projection failed: {err:#}"),
     }
+    // Keep the sync ACK above independent: only Codex's terminal turn event may
+    // request an APNs wakeup.
+    maybe_send_task_progress_push(
+        writer,
+        identity,
+        active_threads,
+        &notification,
+        &device_id,
+        &thread_id,
+    )
+    .await?;
     Ok(())
+}
+
+async fn maybe_send_task_progress_push<S, E>(
+    writer: &mut S,
+    identity: &AgentIdentity,
+    active_threads: Arc<RwLock<HashMap<String, ActiveThread>>>,
+    notification: &Value,
+    device_id: &str,
+    thread_id: &str,
+) -> Result<()>
+where
+    S: Sink<Message, Error = E> + Unpin,
+    E: std::error::Error + Send + Sync + 'static,
+{
+    let Some(marker) = task_progress_push_marker(notification) else {
+        if is_task_progress_push_trigger(notification) {
+            warn!(
+                thread_id = %thread_id,
+                device_id = %device_id,
+                "turn_completed_push_skipped_missing_turn_id"
+            );
+        }
+        return Ok(());
+    };
+    if !claim_task_progress_push(active_threads, thread_id, &marker).await {
+        info!(
+            thread_id = %thread_id,
+            device_id = %device_id,
+            marker = %marker,
+            "task_progress_push_skip_duplicate"
+        );
+        return Ok(());
+    }
+    info!(
+        thread_id = %thread_id,
+        device_id = %device_id,
+        marker = %marker,
+        "task_progress_push_emit"
+    );
+    send_wire_message(
+        writer,
+        task_progress_push_wire(identity, device_id, thread_id)?,
+    )
+    .await
+}
+
+async fn claim_task_progress_push(
+    active_threads: Arc<RwLock<HashMap<String, ActiveThread>>>,
+    thread_id: &str,
+    marker: &str,
+) -> bool {
+    let mut active = active_threads.write().await;
+    let Some(current) = active.get_mut(thread_id) else {
+        return false;
+    };
+    if current.last_pushed_completion.as_deref() == Some(marker) {
+        return false;
+    }
+    current.last_pushed_completion = Some(marker.to_string());
+    true
 }
 
 async fn notification_metadata_syncs(
@@ -1039,11 +1098,7 @@ where
     Ok(())
 }
 
-fn task_error_update(
-    device_id: &str,
-    thread_id: &str,
-    error: &str,
-) -> serde_json::Value {
+fn task_error_update(device_id: &str, thread_id: &str, error: &str) -> serde_json::Value {
     json!({
         "kind": "task_update",
         "device_id": device_id,
@@ -1611,6 +1666,7 @@ async fn track_wire_message(
             cursor,
             checkpoint,
             project_id,
+            last_pushed_completion: None,
         });
 }
 
@@ -1660,6 +1716,37 @@ fn notification_method(notification: &serde_json::Value) -> Option<&str> {
 
 fn is_task_progress_push_trigger(notification: &serde_json::Value) -> bool {
     matches!(notification_method(notification), Some("turn/completed"))
+}
+
+fn task_progress_push_marker(notification: &serde_json::Value) -> Option<String> {
+    if !is_task_progress_push_trigger(notification) {
+        return None;
+    }
+    notification_turn_id(notification).map(|turn_id| format!("turn:{turn_id}"))
+}
+
+fn notification_turn_id(notification: &serde_json::Value) -> Option<String> {
+    notification
+        .get("params")
+        .and_then(|params| {
+            params
+                .get("turnId")
+                .or_else(|| params.get("turn_id"))
+                .and_then(Value::as_str)
+                .or_else(|| {
+                    params
+                        .get("turn")
+                        .and_then(|turn| turn.get("id"))
+                        .and_then(Value::as_str)
+                })
+        })
+        .or_else(|| {
+            notification
+                .get("turnId")
+                .or_else(|| notification.get("turn_id"))
+                .and_then(Value::as_str)
+        })
+        .map(str::to_string)
 }
 
 fn notification_thread_payload(notification: &serde_json::Value) -> Option<&Value> {
@@ -1822,9 +1909,16 @@ fn agent_ws_url(server_url: &str, agent_id: &str, session_token: &str) -> Result
 
 #[cfg(test)]
 mod tests {
-    use serde_json::json;
+    use std::collections::HashMap;
+    use std::sync::Arc;
 
-    use super::{agent_ws_url, thread_sync_completed};
+    use serde_json::json;
+    use tokio::sync::RwLock;
+
+    use super::{
+        ActiveThread, agent_ws_url, claim_task_progress_push, task_progress_push_marker,
+        thread_sync_completed,
+    };
 
     #[test]
     fn agent_ws_url_preserves_reverse_proxy_prefix() {
@@ -1907,6 +2001,68 @@ mod tests {
                 .and_then(|value| value.as_u64()),
             Some(2)
         );
+    }
+
+    #[test]
+    fn task_progress_push_marker_only_uses_terminal_turns() {
+        let sync_completion = task_progress_push_marker(&json!({
+            "kind": "thread_sync_completed",
+            "thread_id": "thread-1",
+            "checkpoint": "turn:turn-1"
+        }));
+        assert_eq!(sync_completion, None);
+
+        let progress = task_progress_push_marker(&json!({
+            "method": "item/completed",
+            "params": {
+                "threadId": "thread-1",
+                "turnId": "turn-1"
+            }
+        }));
+        assert_eq!(progress, None);
+
+        let completed = task_progress_push_marker(&json!({
+            "method": "turn/completed",
+            "params": {
+                "threadId": "thread-1",
+                "turn": {
+                    "id": "turn-1",
+                    "items": [],
+                    "status": "completed"
+                }
+            }
+        }));
+        assert_eq!(completed.as_deref(), Some("turn:turn-1"));
+    }
+
+    #[test]
+    fn task_progress_push_marker_requires_app_server_turn_id() {
+        let marker = task_progress_push_marker(&json!({
+            "method": "turn/completed",
+            "params": {
+                "threadId": "thread-1"
+            }
+        }));
+
+        assert_eq!(marker, None);
+    }
+
+    #[tokio::test]
+    async fn task_progress_push_claim_dedupes_same_completion() {
+        let active_threads = Arc::new(RwLock::new(HashMap::from([(
+            "thread-1".to_string(),
+            ActiveThread {
+                device_id: "ios-device".to_string(),
+                cursor: 0,
+                checkpoint: None,
+                project_id: None,
+                last_pushed_completion: None,
+            },
+        )])));
+
+        assert!(claim_task_progress_push(active_threads.clone(), "thread-1", "turn:turn-1").await);
+        assert!(!claim_task_progress_push(active_threads.clone(), "thread-1", "turn:turn-1").await);
+        assert!(claim_task_progress_push(active_threads, "thread-1", "turn:turn-2").await);
     }
 }
 

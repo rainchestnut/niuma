@@ -19,6 +19,19 @@ struct ProjectSessionsView: View {
                             .font(.system(size: 28, weight: .bold))
                             .foregroundStyle(NiumaPalette.ink)
                         Spacer()
+                        NavigationLink {
+                            NewTaskView(project: project)
+                        } label: {
+                            Image(systemName: "square.and.pencil")
+                                .font(.system(size: 15, weight: .semibold))
+                                .foregroundStyle(NiumaPalette.ink)
+                                .frame(width: 38, height: 38)
+                                .background(Circle().fill(NiumaPalette.raisedCard))
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("新建项目对话")
+                        .accessibilityIdentifier("project-new-thread-button")
+
                         Button {
                             Task { await appModel.refresh() }
                         } label: {
@@ -233,6 +246,7 @@ struct BranchChangesSheet: View {
     @Environment(\.dismiss) private var dismiss
     @State private var didRequest = false
     @State private var requestTimedOut = false
+    @State private var isShowingBranchChangeDetail = false
 
     let session: ThreadSummary
 
@@ -242,9 +256,19 @@ struct BranchChangesSheet: View {
                 VStack(alignment: .leading, spacing: 14) {
                     if let result = appModel.branchChangesByThread[session.threadID] {
                         if result.succeeded, let summary = result.summary {
-                            BranchChangeSummaryBlock(summary: summary)
+                            Button {
+                                openBranchChangeDetail(result)
+                            } label: {
+                                BranchChangeSummaryBlock(summary: summary)
+                            }
+                            .buttonStyle(.plain)
                             ForEach(result.filesSummary, id: \.path) { file in
-                                BranchFileChangeRow(file: file)
+                                Button {
+                                    openBranchChangeDetail(result)
+                                } label: {
+                                    BranchFileChangeRow(file: file)
+                                }
+                                .buttonStyle(.plain)
                             }
                         } else {
                             Text(result.error ?? "无法读取分支变更。")
@@ -290,7 +314,44 @@ struct BranchChangesSheet: View {
                     await requestBranchChanges()
                 }
             }
+            .fullScreenCover(isPresented: $isShowingBranchChangeDetail) {
+                if let part = branchDetailPart {
+                    FileChangeDetailSheet(part: part, rawData: branchDetailData)
+                }
+            }
         }
+    }
+
+    private var branchDetailPart: ContentPart? {
+        guard let result = appModel.branchChangesByThread[session.threadID],
+              result.succeeded,
+              let summary = result.summary else {
+            return nil
+        }
+        return ContentPart(
+            kind: .fileChangeSummary,
+            transferID: result.transferID,
+            fileType: "file",
+            fileName: "branch-diff-bundle.json",
+            mimeType: "application/json",
+            sizeBytes: result.sizeBytes,
+            files: summary.files,
+            additions: summary.additions,
+            deletions: summary.deletions,
+            filesSummary: result.filesSummary
+        )
+    }
+
+    private var branchDetailData: Data? {
+        guard let transferID = appModel.branchChangesByThread[session.threadID]?.transferID else {
+            return nil
+        }
+        return appModel.localAttachmentData(forTransferID: transferID)
+    }
+
+    private func openBranchChangeDetail(_ result: BranchChangesResult) {
+        isShowingBranchChangeDetail = true
+        Task { await appModel.ensureBranchChangeBundleDownloaded(result) }
     }
 
     private func requestBranchChanges() async {
@@ -322,6 +383,9 @@ private struct BranchChangeSummaryBlock: View {
                     .foregroundStyle(NiumaPalette.mutedInk)
             }
             Spacer()
+            Image(systemName: "chevron.up.forward")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(NiumaPalette.mutedInk)
         }
         .padding(14)
         .background(
@@ -347,6 +411,9 @@ private struct BranchFileChangeRow: View {
             Text("-\(file.deletions)")
                 .font(.caption.weight(.semibold))
                 .foregroundStyle(.red)
+            Image(systemName: "chevron.right")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(NiumaPalette.mutedInk)
         }
         .padding(12)
         .background(

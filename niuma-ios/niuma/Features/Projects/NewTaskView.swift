@@ -1,74 +1,203 @@
+import Foundation
+import PhotosUI
 import SwiftUI
+import UniformTypeIdentifiers
 
+/// Composer-first screen for creating either a project thread or a projectless conversation.
 struct NewTaskView: View {
     @Environment(AppModel.self) private var appModel
     @Environment(\.dismiss) private var dismiss
 
-    @State private var selectedProjectID = ""
+    let project: ProjectSummary?
+
     @State private var prompt = ""
     @State private var isSubmitting = false
+    @State private var selectedPhotoItem: PhotosPickerItem?
+    @State private var pendingAttachments: [OutgoingAttachment] = []
+    @State private var isShowingAttachmentOptions = false
+    @State private var isPickingPhotoMedia = false
+    @State private var isImportingFile = false
+    @FocusState private var isPromptFocused: Bool
+
+    init(project: ProjectSummary? = nil) {
+        self.project = project
+    }
+
+    private var targetProjectID: String {
+        project?.projectID ?? conversationProjectID
+    }
+
+    private var targetTitle: String {
+        project?.projectName ?? appModel.localized("新对话", "New Chat")
+    }
+
+    private var targetSubtitle: String {
+        project == nil
+            ? appModel.localized("无项目对话", "No Project")
+            : appModel.localized("项目对话", "Project")
+    }
+
+    private var targetIcon: String {
+        project == nil ? "bubble.left.and.text.bubble.right" : "folder"
+    }
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 18) {
-                SurfaceCard(title: "项目", subtitle: "先选择要把任务发往哪个 desktop project。") {
-                    Picker("目标项目", selection: $selectedProjectID) {
-                        ForEach(appModel.workspaceProjects) { project in
-                            Text(project.projectName).tag(project.projectID)
-                        }
-                    }
-                    .pickerStyle(.menu)
-                    .niumaInputChrome()
+            VStack(spacing: 14) {
+                Spacer(minLength: 96)
+                Image(systemName: targetIcon)
+                    .font(.system(size: 28, weight: .medium))
+                    .foregroundStyle(NiumaPalette.info)
+                    .frame(width: 58, height: 58)
+                    .background(Circle().fill(NiumaPalette.infoSoft))
+                VStack(spacing: 6) {
+                    Text(targetTitle)
+                        .font(.title3.weight(.semibold))
+                        .foregroundStyle(NiumaPalette.ink)
+                        .multilineTextAlignment(.center)
+                    Text(targetSubtitle)
+                        .font(.caption)
+                        .foregroundStyle(NiumaPalette.mutedInk)
                 }
-
-                SurfaceCard(title: "任务", subtitle: "直接输入要发给桌面 Codex 的任务内容。") {
-                    TextField("输入要发给桌面 Codex 的任务", text: $prompt, axis: .vertical)
-                        .lineLimit(4...10)
-                        .niumaInputChrome()
-                }
-
-                SurfaceCard(title: "提交") {
-                    Button {
-                        Task {
-                            await submit()
-                        }
-                    } label: {
-                        if isSubmitting {
-                            ProgressView()
-                                .tint(.white)
-                                .frame(maxWidth: .infinity)
-                        } else {
-                            Text("发起任务")
-                                .frame(maxWidth: .infinity)
-                        }
-                    }
-                    .buttonStyle(NiumaPrimaryButtonStyle())
-                    .disabled(isSubmitting || selectedProjectID.isEmpty)
-                }
+                Spacer(minLength: 160)
             }
-            .padding()
+            .frame(maxWidth: .infinity)
+            .padding(.horizontal, 22)
         }
         .niumaScreenBackground()
-        .navigationTitle("新任务")
-        .task {
-            if selectedProjectID.isEmpty {
-                selectedProjectID = appModel.selectedProjectID ?? ""
+        .navigationBarBackButtonHidden()
+        .toolbar(.hidden, for: .navigationBar)
+        .safeAreaInset(edge: .top, spacing: 0) {
+            header
+        }
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            composer
+        }
+        .fileImporter(
+            isPresented: $isImportingFile,
+            allowedContentTypes: [.item],
+            allowsMultipleSelection: true
+        ) { result in
+            handleFileImport(result)
+        }
+        .photosPicker(
+            isPresented: $isPickingPhotoMedia,
+            selection: $selectedPhotoItem,
+            matching: .any(of: [.images, .videos])
+        )
+        .confirmationDialog("添加附件", isPresented: $isShowingAttachmentOptions, titleVisibility: .visible) {
+            Button("添加图片或视频") {
+                isPickingPhotoMedia = true
             }
+            Button("添加文件") {
+                isImportingFile = true
+            }
+            Button("取消", role: .cancel) {}
+        }
+        .onChange(of: selectedPhotoItem) { _, newItem in
+            guard let newItem else { return }
+            Task { await loadPhotoAttachment(newItem) }
+        }
+        .onAppear {
+            isPromptFocused = true
         }
     }
 
+    private var header: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 12) {
+                Button {
+                    dismiss()
+                } label: {
+                    Image(systemName: "chevron.left")
+                        .font(.system(size: 17, weight: .semibold))
+                        .foregroundStyle(NiumaPalette.ink)
+                        .frame(width: 34, height: 34)
+                        .contentShape(Circle())
+                }
+                .buttonStyle(.plain)
+
+                Text(targetTitle)
+                    .font(.headline.weight(.semibold))
+                    .foregroundStyle(NiumaPalette.ink)
+                    .lineLimit(1)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .padding(.horizontal, 18)
+            .padding(.top, 10)
+            .padding(.bottom, 12)
+            .background(ThreadTopFade())
+        }
+    }
+
+    private var composer: some View {
+        ThreadComposerBar(
+            prompt: $prompt,
+            placeholder: appModel.localized("发送第一条消息", "Send the first message"),
+            attachments: pendingAttachments,
+            isSending: isSubmitting,
+            isPromptFocused: $isPromptFocused,
+            onAddAttachment: {
+                isShowingAttachmentOptions = true
+            },
+            onRemoveAttachment: { attachment in
+                pendingAttachments.removeAll { $0.id == attachment.id }
+            },
+            onSend: {
+                Task {
+                    await submit()
+                }
+            }
+        )
+    }
+
     private func submit() async {
+        guard !isSubmitting else { return }
         isSubmitting = true
         defer { isSubmitting = false }
 
         do {
             try await appModel.startNewTask(
-                projectID: selectedProjectID,
-                prompt: prompt
+                projectID: targetProjectID,
+                prompt: prompt,
+                attachments: pendingAttachments
             )
             dismiss()
         } catch {
             appModel.pendingError = error.localizedDescription
+        }
+    }
+
+    private func loadPhotoAttachment(_ item: PhotosPickerItem) async {
+        defer { selectedPhotoItem = nil }
+        do {
+            guard let attachment = try await ThreadAttachmentLoader.photoAttachment(
+                from: item,
+                nextIndex: pendingAttachments.count + 1
+            ) else { return }
+            pendingAttachments.append(attachment)
+        } catch {
+            appModel.pendingError = error.localizedDescription
+        }
+    }
+
+    /// Handles document picker results and keeps successfully read files attached.
+    private func handleFileImport(_ result: Result<[URL], Error>) {
+        switch result {
+        case .success(let urls):
+            Task { await loadFileAttachments(urls) }
+        case .failure(let error):
+            appModel.pendingError = error.localizedDescription
+        }
+    }
+
+    private func loadFileAttachments(_ urls: [URL]) async {
+        for url in urls {
+            do {
+                pendingAttachments.append(try ThreadAttachmentLoader.fileAttachment(from: url))
+            } catch {
+                appModel.pendingError = error.localizedDescription
+            }
         }
     }
 }

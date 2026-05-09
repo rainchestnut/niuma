@@ -17,7 +17,7 @@ use url::Url;
 use crate::codex_app_server::CodexAppServerClient;
 use crate::diff_summary;
 use crate::identity::AgentIdentity;
-use crate::metadata::{CodexWorkspaceStore, home_cwd};
+use crate::metadata::CodexWorkspaceStore;
 use crate::thread_status::normalize_thread_status;
 use crate::transfers::{
     TransferContext, encode_content_parts_payload, file_bytes_from_part, sha256_hex,
@@ -34,6 +34,10 @@ pub struct TaskStartInbound {
     pub thread_id: Option<String>,
     pub ciphertext: String,
     pub model: Option<String>,
+    pub effort: Option<String>,
+    pub approval_policy: Option<String>,
+    pub approvals_reviewer: Option<String>,
+    pub sandbox_mode: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -77,6 +81,29 @@ struct ThreadEvent {
     created_at: Option<f64>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum TaskProjectRoute {
+    Workspace { project_id: String, cwd: String },
+    // Codex app-server treats an omitted cwd as a projectless conversation.
+    Conversation,
+}
+
+impl TaskProjectRoute {
+    fn project_id(&self) -> &str {
+        match self {
+            Self::Workspace { project_id, .. } => project_id,
+            Self::Conversation => CONVERSATION_PROJECT_ID,
+        }
+    }
+
+    fn cwd(&self) -> Option<&str> {
+        match self {
+            Self::Workspace { cwd, .. } => Some(cwd),
+            Self::Conversation => None,
+        }
+    }
+}
+
 pub struct TaskRuntime {
     identity: AgentIdentity,
     app_server: CodexAppServerClient,
@@ -101,34 +128,61 @@ impl TaskRuntime {
 
     /// Start or resume a Codex thread, submit the mobile turn, and emit sync rows.
     pub async fn start_task_messages(&self, message: TaskStartInbound) -> Result<Vec<Value>> {
-        let project = self.project_for_task(&message.project_id);
-        let cwd = project
-            .as_ref()
-            .and_then(|project| project.cwd.clone())
-            .unwrap_or_else(home_cwd);
+        let route = self.project_route_for_task(&message.project_id)?;
+        let cwd = route.cwd();
         let requested_thread_id = message.thread_id.as_deref();
         let thread_payload = match requested_thread_id {
             Some(thread_id) => match self
                 .app_server
-                .resume_thread_payload(thread_id, Some(&cwd))
+                .resume_thread_payload(
+                    thread_id,
+                    cwd,
+                    message.approval_policy.as_deref(),
+                    message.approvals_reviewer.as_deref(),
+                    message.sandbox_mode.as_deref(),
+                )
                 .await
             {
                 Ok(thread) => thread,
-                Err(_) => self.app_server.start_thread_payload(&cwd).await?,
+                Err(_) => {
+                    self.app_server
+                        .start_thread_payload(
+                            cwd,
+                            message.approval_policy.as_deref(),
+                            message.approvals_reviewer.as_deref(),
+                            message.sandbox_mode.as_deref(),
+                        )
+                        .await?
+                }
             },
-            None => self.app_server.start_thread_payload(&cwd).await?,
+            None => {
+                self.app_server
+                    .start_thread_payload(
+                        cwd,
+                        message.approval_policy.as_deref(),
+                        message.approvals_reviewer.as_deref(),
+                        message.sandbox_mode.as_deref(),
+                    )
+                    .await?
+            }
         };
         let thread_id = string_field(&thread_payload, "id").context("Codex thread missing id")?;
-        let project_id = project
-            .map(|project| project.project_id)
-            .unwrap_or_else(|| CONVERSATION_PROJECT_ID.to_string());
+        let project_id = route.project_id().to_string();
         let plaintext = self.decrypt_mobile_task_payload(&message)?;
         let input_items = self
             .decode_mobile_payload_to_codex_input(&message.device_id, &plaintext)
             .await;
         let turn_payload = self
             .app_server
-            .start_turn_payload(&thread_id, input_items, message.model.as_deref())
+            .start_turn_payload(
+                &thread_id,
+                input_items,
+                message.model.as_deref(),
+                message.effort.as_deref(),
+                message.approval_policy.as_deref(),
+                message.approvals_reviewer.as_deref(),
+                message.sandbox_mode.as_deref(),
+            )
             .await?;
         let turn_id = string_field(&turn_payload, "id").context("Codex turn missing id")?;
         let replay_payload = self
@@ -156,7 +210,7 @@ impl TaskRuntime {
     pub async fn resume_thread_messages(&self, message: ResumeThreadInbound) -> Result<Vec<Value>> {
         let thread_payload = self
             .app_server
-            .resume_thread_payload(&message.thread_id, None)
+            .resume_thread_payload(&message.thread_id, None, None, None, None)
             .await
             .unwrap_or_else(|_| json!({ "id": message.thread_id }));
         let replay_payload = self
@@ -173,13 +227,13 @@ impl TaskRuntime {
         )
     }
 
-    fn project_for_task(&self, project_id: &str) -> Option<crate::metadata::ProjectSummary> {
-        if project_id == CONVERSATION_PROJECT_ID {
-            return None;
-        }
-        self.workspace_store
-            .project_for_id(project_id)
-            .or_else(|| self.workspace_store.active_project())
+    fn project_route_for_task(&self, project_id: &str) -> Result<TaskProjectRoute> {
+        let project = if project_id == CONVERSATION_PROJECT_ID {
+            None
+        } else {
+            self.workspace_store.project_for_id(project_id)
+        };
+        task_project_route(project_id, project)
     }
 
     fn decrypt_mobile_task_payload(&self, message: &TaskStartInbound) -> Result<String> {
@@ -299,6 +353,23 @@ impl TaskRuntime {
     }
 }
 
+fn task_project_route(
+    project_id: &str,
+    project: Option<crate::metadata::ProjectSummary>,
+) -> Result<TaskProjectRoute> {
+    if project_id == CONVERSATION_PROJECT_ID {
+        return Ok(TaskProjectRoute::Conversation);
+    }
+    let project = project.with_context(|| format!("unknown project_id={project_id}"))?;
+    let cwd = project
+        .cwd
+        .with_context(|| format!("project_id={project_id} has no workspace cwd"))?;
+    Ok(TaskProjectRoute::Workspace {
+        project_id: project.project_id,
+        cwd,
+    })
+}
+
 pub fn task_start_aad(message: &TaskStartInbound) -> Vec<u8> {
     crypto::payload_aad(&[
         ("kind", "task_start".to_string()),
@@ -333,14 +404,14 @@ fn metadata_messages_for_thread(context: &ThreadContext) -> Vec<Value> {
         return Vec::new();
     };
     vec![json!({
-            "kind": "thread_sync",
-            "thread_id": context.thread_id,
-            "project_id": project_id,
-            "title": context.title,
-            "status": context.status,
-            "last_checkpoint_seen": null,
-            "updated_at": context.updated_at,
-        })]
+        "kind": "thread_sync",
+        "thread_id": context.thread_id,
+        "project_id": project_id,
+        "title": context.title,
+        "status": context.status,
+        "last_checkpoint_seen": null,
+        "updated_at": context.updated_at,
+    })]
 }
 
 fn thread_context(payload: &Value, project_id: Option<String>) -> ThreadContext {
@@ -1095,6 +1166,64 @@ fn non_empty(value: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::metadata::ProjectSummary;
+
+    #[test]
+    fn conversation_project_route_omits_workspace_cwd() {
+        let route = task_project_route(CONVERSATION_PROJECT_ID, None).expect("conversation route");
+
+        assert_eq!(route, TaskProjectRoute::Conversation);
+        assert_eq!(route.project_id(), CONVERSATION_PROJECT_ID);
+        assert_eq!(route.cwd(), None);
+    }
+
+    #[test]
+    fn workspace_project_route_uses_project_cwd() {
+        let route = task_project_route(
+            "workspace-1",
+            Some(ProjectSummary {
+                project_id: "workspace-1".to_string(),
+                project_name: "Project".to_string(),
+                cwd: Some("/tmp/project".to_string()),
+                updated_at: None,
+            }),
+        )
+        .expect("workspace route");
+
+        assert_eq!(route.project_id(), "workspace-1");
+        assert_eq!(route.cwd(), Some("/tmp/project"));
+    }
+
+    #[test]
+    fn unknown_project_route_errors_without_active_project_fallback() {
+        let error = task_project_route("workspace-missing", None).expect_err("unknown project");
+
+        assert!(
+            error
+                .to_string()
+                .contains("unknown project_id=workspace-missing")
+        );
+    }
+
+    #[test]
+    fn workspace_project_route_requires_cwd() {
+        let error = task_project_route(
+            "workspace-1",
+            Some(ProjectSummary {
+                project_id: "workspace-1".to_string(),
+                project_name: "Project".to_string(),
+                cwd: None,
+                updated_at: None,
+            }),
+        )
+        .expect_err("missing cwd");
+
+        assert!(
+            error
+                .to_string()
+                .contains("project_id=workspace-1 has no workspace cwd")
+        );
+    }
 
     #[test]
     fn builds_file_attachment_fallback_without_local_payload() {

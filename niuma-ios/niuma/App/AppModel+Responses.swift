@@ -1,7 +1,11 @@
 import Foundation
 
 extension AppModel {
-    func resolveApproval(_ approval: ApprovalSummary, decision: ApprovalDecision) async {
+    func resolveApproval(
+        _ approval: ApprovalSummary,
+        decision: ApprovalDecision,
+        grantScope: ApprovalGrantScope? = nil
+    ) async {
         guard let identity, let selectedAgent else { return }
         do {
             let controller = try requireController()
@@ -13,7 +17,8 @@ extension AppModel {
                     bindingID: selectedAgent.bindingID,
                     agentEncryptionPublicKey: selectedAgent.agentEncryptionPublicKey,
                     approvalID: approval.approvalID,
-                    decision: decision
+                    decision: decision,
+                    grantScope: grantScope
                 )
             )
             if let index = approvals.firstIndex(where: { $0.approvalID == approval.approvalID }) {

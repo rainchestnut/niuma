@@ -185,7 +185,11 @@ final class LiveNiumaController: NiumaControlling {
             threadID: request.threadID,
             ciphertext: ciphertext,
             signature: signature,
-            model: request.model
+            model: request.model,
+            effort: request.effort,
+            approvalPolicy: request.approvalPolicy,
+            approvalsReviewer: request.approvalsReviewer,
+            sandboxMode: request.sandboxMode
         )
         try await sendWebSocket(taskStart)
     }
@@ -235,7 +239,7 @@ final class LiveNiumaController: NiumaControlling {
                 ApprovalResponsePlaintext(
                     approvalID: request.approvalID,
                     decision: request.decision.rawValue,
-                    grantScope: nil
+                    grantScope: request.grantScope
                 )
             ),
             context: cryptoContext,

@@ -11,6 +11,57 @@ extension AppModel {
         storage.set(theme.rawValue, forKey: StorageKey.appTheme.rawValue)
     }
 
+    func selectApprovalPermissionPreset(_ preset: ApprovalPermissionPreset) {
+        approvalPermissionPreset = preset
+        storage.set(preset.rawValue, forKey: StorageKey.approvalPermissionPreset.rawValue)
+    }
+
+    func selectCustomApprovalPolicy(_ policy: CodexApprovalPolicy) {
+        customApprovalPolicy = policy
+        storage.set(policy.rawValue, forKey: StorageKey.customApprovalPolicy.rawValue)
+    }
+
+    func selectCustomApprovalsReviewer(_ reviewer: CodexApprovalsReviewer) {
+        customApprovalsReviewer = reviewer
+        storage.set(reviewer.rawValue, forKey: StorageKey.customApprovalsReviewer.rawValue)
+    }
+
+    func selectCustomSandboxMode(_ mode: CodexSandboxMode) {
+        customSandboxMode = mode
+        storage.set(mode.rawValue, forKey: StorageKey.customSandboxMode.rawValue)
+    }
+
+    /// Converts the mobile permission preset into Codex app-server overrides.
+    /// The default preset intentionally omits overrides so desktop config stays authoritative.
+    func approvalPermissionOverrides() -> ApprovalPermissionOverrides {
+        switch approvalPermissionPreset {
+        case .defaultPermissions:
+            return ApprovalPermissionOverrides(
+                approvalPolicy: nil,
+                approvalsReviewer: nil,
+                sandboxMode: nil
+            )
+        case .autoReview:
+            return ApprovalPermissionOverrides(
+                approvalPolicy: .onRequest,
+                approvalsReviewer: .guardianSubagent,
+                sandboxMode: .workspaceWrite
+            )
+        case .fullAccess:
+            return ApprovalPermissionOverrides(
+                approvalPolicy: .never,
+                approvalsReviewer: nil,
+                sandboxMode: .dangerFullAccess
+            )
+        case .custom:
+            return ApprovalPermissionOverrides(
+                approvalPolicy: customApprovalPolicy,
+                approvalsReviewer: customApprovalsReviewer,
+                sandboxMode: customSandboxMode
+            )
+        }
+    }
+
     /// Persists the Niuma Server endpoint and rebuilds the transport layer when it changes.
     /// - Parameters:
     ///   - rawValue: User-entered server endpoint. Accepts `http`/`https` URLs and adds `https://` when omitted.

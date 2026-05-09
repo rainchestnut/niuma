@@ -409,7 +409,8 @@ Niuma 统一投影：
 | `model` | request | string | 否 | 模型名 |
 | `cwd` | request | string | 否 | 工作目录 |
 | `approvalPolicy` | request | string | 否 | 审批策略 |
-| `sandboxPolicy` | request | object | 否 | sandbox 配置 |
+| `approvalsReviewer` | request | string | 否 | 审批审查人，`user` 或 `guardian_subagent` |
+| `sandbox` | request | string | 否 | thread 级 sandbox 模式 |
 | `serviceName` | request | string | 否 | 集成名，建议填 `niuma-cli` |
 | `thread.id` | response | string | 是 | 新 thread ID |
 
@@ -419,6 +420,9 @@ Niuma 统一投影：
 | --- | --- | --- | --- | --- |
 | `threadId` | request | string | 是 | 已有 thread ID |
 | `cwd` | request | string | 否 | 恢复时覆盖 cwd |
+| `approvalPolicy` | request | string | 否 | 可覆盖审批策略 |
+| `approvalsReviewer` | request | string | 否 | 可覆盖审批审查人 |
+| `sandbox` | request | string | 否 | 可覆盖 thread 级 sandbox 模式 |
 | `thread.id` | response | string | 是 | thread ID |
 
 ### 7.5 `thread/read`
@@ -445,6 +449,7 @@ Niuma 统一投影：
 | `input` | request | array | 是 | 用户输入 items |
 | `cwd` | request | string | 否 | 可覆盖工作目录 |
 | `approvalPolicy` | request | string | 否 | 可覆盖审批策略 |
+| `approvalsReviewer` | request | string | 否 | 可覆盖审批审查人 |
 | `sandboxPolicy` | request | object | 否 | 可覆盖 sandbox |
 | `turn.id` | response | string | 是 | turn ID |
 
@@ -534,11 +539,16 @@ Gateway 至少需要处理：
 | `thread_id` | string | 否 | 已有 thread ID；为空时通过 Codex app-server 创建新 thread |
 | `ciphertext` | string | 是 | 加密任务正文 |
 | `model` | string | 否 | 移动端选择的 Codex 模型 |
+| `effort` | string | 否 | 移动端选择的推理强度 |
+| `approval_policy` | string | 否 | 移动端权限模式映射出的 Codex 审批策略 |
+| `approvals_reviewer` | string | 否 | 移动端权限模式映射出的审批审查人 |
+| `sandbox_mode` | string | 否 | 移动端权限模式映射出的 sandbox 模式 |
 
 说明：
 
 - 解密后的任务正文应采用 `content_parts`，而不是只支持单一字符串。
 - `content_parts` 中的大文件引用必须先完成 transfer，再进入 Codex app-server 调用。
+- Gateway 将 `sandbox_mode` 映射为 `thread/start` / `thread/resume` 的 `sandbox` 字符串，以及 `turn/start` 的 `sandboxPolicy` 对象。
 - 移动端不生成本地 session 或 canonical message id；新任务的 thread ID 与稳定消息 ID 来自 Codex app-server 的投影。
 
 ### 8.5 出站消息 `task_update`
@@ -591,6 +601,7 @@ Gateway 至少需要处理：
 | `approval_id` | string | 是 | 审批 ID |
 | `decision` | string | 是 | allow / reject |
 | `grant_scope` | object | 否 | 授权范围 |
+| `grant_scope.scope` | string | 否 | `turn` 或 `session` |
 
 ### 8.9 入站消息 `resume_thread`
 

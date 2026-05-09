@@ -119,7 +119,17 @@ impl ConnectionHub {
         if agent_id.is_some_and(|expected| expected != connection.agent_id) {
             return false;
         }
-        send_json(&connection.sender, payload)
+        if send_json(&connection.sender, payload) {
+            return true;
+        }
+        let mut mobile = self.mobile.lock().await;
+        if mobile
+            .get(device_id)
+            .is_some_and(|current| current.connection_id == connection.connection_id)
+        {
+            mobile.remove(device_id);
+        }
+        false
     }
 
     pub async fn send_to_agent(&self, agent_id: &str, payload: Value) -> bool {

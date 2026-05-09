@@ -314,10 +314,15 @@ Transfer API 用于短时中转媒体和文件。当前实现用 `X-Session-Toke
 | `ciphertext` | string | 是 | 加密业务内容 |
 | `signature` | string | 是 | 设备签名 |
 | `model` | string | 否 | 当前选择的 Codex 模型 |
+| `effort` | string | 否 | 当前选择的推理强度 |
+| `approval_policy` | string | 否 | 移动端权限模式映射出的 Codex 审批策略 |
+| `approvals_reviewer` | string | 否 | 移动端权限模式映射出的审批审查人 |
+| `sandbox_mode` | string | 否 | 移动端权限模式映射出的 sandbox 模式 |
 
 说明：
 
 - 移动端不生成 canonical message id，也不创建本地 session。消息入库、真实 thread id 与稳定 item id 由桌面 Codex / app-server 负责。
+- Server 只校验签名并转发这些权限覆盖字段，不解释其语义。
 
 #### `resume_thread`
 

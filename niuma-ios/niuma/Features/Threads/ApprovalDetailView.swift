@@ -34,14 +34,33 @@ struct ApprovalDetailView: View {
 
                 SurfaceCard(title: "操作") {
                     VStack(spacing: 12) {
-                        Button("Allow") {
+                        Button("本次允许") {
                             Task {
                                 await appModel.resolveApproval(approval, decision: .allow)
                             }
                         }
                         .buttonStyle(NiumaPrimaryButtonStyle())
 
-                        Button("Reject", role: .destructive) {
+                        Button("本会话允许") {
+                            Task {
+                                await appModel.resolveApproval(
+                                    approval,
+                                    decision: .allow,
+                                    grantScope: .session(
+                                        threadID: approval.threadID,
+                                        approvalType: approval.approvalType
+                                    )
+                                )
+                            }
+                        }
+                        .font(.headline)
+                        .frame(maxWidth: .infinity)
+                        .padding(.horizontal, 18)
+                        .padding(.vertical, 14)
+                        .background(NiumaPalette.infoSoft, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+                        .foregroundStyle(NiumaPalette.info)
+
+                        Button("拒绝", role: .destructive) {
                             Task {
                                 await appModel.resolveApproval(approval, decision: .reject)
                             }

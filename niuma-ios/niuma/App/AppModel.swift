@@ -23,6 +23,11 @@ final class AppModel {
     var branchChangesByThread: [String: BranchChangesResult] = [:]
     var availableModels: [String] = []
     var selectedModelID: String?
+    var selectedReasoningEffort: ReasoningEffort
+    var approvalPermissionPreset: ApprovalPermissionPreset
+    var customApprovalPolicy: CodexApprovalPolicy
+    var customApprovalsReviewer: CodexApprovalsReviewer
+    var customSandboxMode: CodexSandboxMode
     var pendingError: String?
     var isBootstrapping = false
     var isRefreshing = false
@@ -73,6 +78,21 @@ final class AppModel {
         self.localAttachments = dataStore.loadLocalAttachments()
         self.timelines = [:]
         self.selectedModelID = storage.string(forKey: StorageKey.selectedModelID.rawValue)
+        self.selectedReasoningEffort = ReasoningEffort(
+            rawValue: storage.string(forKey: StorageKey.selectedReasoningEffort.rawValue) ?? ""
+        ) ?? .high
+        self.approvalPermissionPreset = ApprovalPermissionPreset(
+            rawValue: storage.string(forKey: StorageKey.approvalPermissionPreset.rawValue) ?? ""
+        ) ?? .defaultPermissions
+        self.customApprovalPolicy = CodexApprovalPolicy(
+            rawValue: storage.string(forKey: StorageKey.customApprovalPolicy.rawValue) ?? ""
+        ) ?? .onRequest
+        self.customApprovalsReviewer = CodexApprovalsReviewer(
+            rawValue: storage.string(forKey: StorageKey.customApprovalsReviewer.rawValue) ?? ""
+        ) ?? .user
+        self.customSandboxMode = CodexSandboxMode(
+            rawValue: storage.string(forKey: StorageKey.customSandboxMode.rawValue) ?? ""
+        ) ?? .workspaceWrite
         self.appLanguage = AppLanguage(rawValue: storage.string(forKey: StorageKey.appLanguage.rawValue) ?? "") ?? .chinese
         self.appTheme = AppTheme(rawValue: storage.string(forKey: StorageKey.appTheme.rawValue) ?? "") ?? .system
         self.threadSyncResultTask = Task { [weak self, results = threadSyncPipeline.results] in

@@ -8,9 +8,9 @@ struct AppView: View {
     var body: some View {
         NavigationStack(path: $navigationPath) {
             HomeView()
-        }
-        .navigationDestination(for: PushThreadRoute.self) { route in
-            PushThreadDestination(route: route)
+                .navigationDestination(for: PushThreadRoute.self) { route in
+                    PushThreadDestination(route: route)
+                }
         }
         .tint(NiumaPalette.accent)
         .environment(\.locale, Locale(identifier: appModel.localeIdentifier))
