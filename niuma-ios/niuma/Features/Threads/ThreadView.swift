@@ -48,6 +48,14 @@ struct ThreadView: View {
         )
     }
 
+    private var edgeSwipeBackGesture: some Gesture {
+        DragGesture(minimumDistance: 18, coordinateSpace: .global)
+            .onEnded { value in
+                guard shouldDismissFromEdgeSwipe(value) else { return }
+                dismiss()
+            }
+    }
+
     private var pendingApprovals: [ApprovalSummary] {
         appModel.approvals
             .filter { $0.threadID == thread.threadID && $0.status == .pending }
@@ -104,6 +112,7 @@ struct ThreadView: View {
             .safeAreaInset(edge: .bottom, spacing: 0) {
                 composer
             }
+            .simultaneousGesture(edgeSwipeBackGesture)
             .fileImporter(
                 isPresented: $isImportingFile,
                 allowedContentTypes: [.item],
@@ -176,6 +185,19 @@ struct ThreadView: View {
                 expandedProcessGroupIDs.insert(id)
             }
         }
+    }
+
+    /// Restores the expected iOS edge-swipe pop gesture while this screen uses
+    /// a custom hidden-navigation-bar header.
+    private func shouldDismissFromEdgeSwipe(_ value: DragGesture.Value) -> Bool {
+        let startsAtLeadingEdge = value.startLocation.x <= 32
+        let horizontalDistance = value.translation.width
+        let verticalDistance = abs(value.translation.height)
+        let predictedDistance = value.predictedEndTranslation.width
+        return startsAtLeadingEdge
+            && horizontalDistance > 70
+            && predictedDistance > 110
+            && horizontalDistance > verticalDistance * 1.4
     }
 
     private var header: some View {
