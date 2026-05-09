@@ -13,6 +13,9 @@ protocol SecretStore {
     ///   - data: Secret bytes supplied as the `_ data: Data` argument.
     ///   - key: Secret account key passed as the `forKey key: String` argument.
     func set(_ data: Data, forKey key: String) throws
+
+    /// Deletes every secret owned by this store.
+    func removeAll() throws
 }
 
 final class KeychainSecretStore: SecretStore {
@@ -56,6 +59,18 @@ final class KeychainSecretStore: SecretStore {
         }
 
         guard status == errSecSuccess else {
+            throw NSError(domain: NSOSStatusErrorDomain, code: Int(status))
+        }
+    }
+
+    func removeAll() throws {
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service
+        ]
+
+        let status = SecItemDelete(query as CFDictionary)
+        guard status == errSecSuccess || status == errSecItemNotFound else {
             throw NSError(domain: NSOSStatusErrorDomain, code: Int(status))
         }
     }

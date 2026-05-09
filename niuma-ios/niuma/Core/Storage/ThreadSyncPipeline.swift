@@ -66,6 +66,11 @@ final class ThreadSyncPipeline {
         eventContinuation.yield(event)
     }
 
+    /// Clears worker-owned thread replay records after a full app data reset.
+    func resetLocalThreadState() async {
+        await worker.resetLocalThreadState()
+    }
+
     /// Loads one older visible window before the current oldest visible user row.
     func loadPreviousThreadWindow(
         threadID: String,
@@ -124,6 +129,17 @@ private actor ThreadSyncPipelineWorker {
         case .failed(let failure):
             return fail(threadID: failure.threadID, phase: .failed, error: failure.error)
         }
+    }
+
+    /// Removes thread rows and entries held by the pipeline's dedicated SwiftData context.
+    func resetLocalThreadState() {
+        for entry in fetchAll(StoredThreadEntry.self) {
+            context.delete(entry)
+        }
+        for thread in fetchAll(StoredThread.self) {
+            context.delete(thread)
+        }
+        save()
     }
 
     /// Loads the latest visible window: five user turns plus following records.
@@ -313,6 +329,12 @@ private actor ThreadSyncPipelineWorker {
         descriptor.fetchLimit = 1
         descriptor.includePendingChanges = true
         return try? context.fetch(descriptor).first
+    }
+
+    private func fetchAll<T: PersistentModel>(_ model: T.Type) -> [T] {
+        var descriptor = FetchDescriptor<T>()
+        descriptor.includePendingChanges = true
+        return (try? context.fetch(descriptor)) ?? []
     }
 
     private func toDomainEntry(_ stored: StoredThreadEntry) -> ThreadEntry {

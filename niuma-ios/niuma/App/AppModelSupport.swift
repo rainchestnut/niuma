@@ -27,13 +27,16 @@ nonisolated struct TaskProgressNotificationPayload: Decodable {
 }
 
 extension AppModel {
-    /// Resolves the first server URL used at app launch from the phone-local setting.
+    static let defaultServerBaseURLString = "https://rainchestnut.com/niuma-server"
+
+    /// Resolves the first server URL used at app launch from the phone-local setting,
+    /// falling back to the public Niuma server endpoint for fresh installs.
     static func initialServerBaseURL(storage: UserDefaultsStore) -> URL? {
         if let stored = storage.string(forKey: StorageKey.serverBaseURL.rawValue),
            let url = normalizedServerBaseURL(from: stored) {
             return url
         }
-        return nil
+        return normalizedServerBaseURL(from: defaultServerBaseURLString)
     }
 
     static func displayString(forServerBaseURL url: URL) -> String {
