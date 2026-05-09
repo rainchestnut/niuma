@@ -5,12 +5,14 @@ struct ThreadComposerBar: View {
     @Environment(AppModel.self) private var appModel
     @Binding var prompt: String
     @State private var speechTranscriber = ComposerSpeechTranscriber()
+    @State private var isAttachmentPanelExpanded = false
 
     let placeholder: String
     let attachments: [OutgoingAttachment]
     let isSending: Bool
     let isPromptFocused: FocusState<Bool>.Binding
-    let onAddAttachment: () -> Void
+    let onPickPhotoOrVideo: () -> Void
+    let onPickFile: () -> Void
     let onRemoveAttachment: (OutgoingAttachment) -> Void
     let onSend: () -> Void
 
@@ -31,152 +33,180 @@ struct ThreadComposerBar: View {
     }
 
     var body: some View {
-        VStack(spacing: 8) {
-            HStack(spacing: 8) {
-                if appModel.availableModels.isEmpty {
-                    ComposerPill(title: appModel.displayedModelID)
-                } else {
+        VStack(spacing: 0) {
+            VStack(spacing: 8) {
+                HStack(spacing: 8) {
+                    if appModel.availableModels.isEmpty {
+                        ComposerPill(title: appModel.displayedModelID)
+                    } else {
+                        Menu {
+                            ForEach(appModel.availableModels, id: \.self) { modelID in
+                                Button {
+                                    appModel.selectModel(modelID)
+                                } label: {
+                                    if appModel.selectedModelID == modelID {
+                                        Label(modelID, systemImage: "checkmark")
+                                    } else {
+                                        Text(modelID)
+                                    }
+                                }
+                            }
+                        } label: {
+                            ComposerPill(title: appModel.displayedModelID)
+                        }
+                        .buttonStyle(.plain)
+                    }
                     Menu {
-                        ForEach(appModel.availableModels, id: \.self) { modelID in
+                        ForEach(reasoningEfforts) { effort in
                             Button {
-                                appModel.selectModel(modelID)
+                                appModel.selectReasoningEffort(effort)
                             } label: {
-                                if appModel.selectedModelID == modelID {
-                                    Label(modelID, systemImage: "checkmark")
+                                if appModel.selectedReasoningEffort == effort {
+                                    Label(effort.rawValue, systemImage: "checkmark")
                                 } else {
-                                    Text(modelID)
+                                    Text(effort.rawValue)
                                 }
                             }
                         }
                     } label: {
-                        ComposerPill(title: appModel.displayedModelID)
+                        ComposerPill(title: appModel.selectedReasoningEffort.rawValue)
                     }
                     .buttonStyle(.plain)
+                    .accessibilityLabel("选择思考深度")
+                    .accessibilityIdentifier("thread-reasoning-effort-menu")
+                    permissionMenu
+                    Spacer()
                 }
-                Menu {
-                    ForEach(reasoningEfforts) { effort in
+
+                if !attachments.isEmpty {
+                    ComposerAttachmentStrip(attachments: attachments, onRemove: onRemoveAttachment)
+                }
+
+                HStack(spacing: 10) {
+                    Button {
+                        toggleAttachmentPanel()
+                    } label: {
+                        Image(systemName: "plus")
+                            .font(.system(size: 17, weight: .medium))
+                            .foregroundStyle(NiumaPalette.ink)
+                            .rotationEffect(.degrees(isAttachmentPanelExpanded ? 45 : 0))
+                            .frame(width: 34, height: 34)
+                            .background(
+                                Circle()
+                                    .fill(isAttachmentPanelExpanded ? NiumaPalette.neutralSoft : .clear)
+                            )
+                            .contentShape(Circle())
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(isSending)
+                    .accessibilityLabel("添加附件")
+                    .accessibilityIdentifier("thread-attachment-button")
+
+                    HStack(alignment: .bottom, spacing: 10) {
+                        TextField(placeholder, text: $prompt, axis: .vertical)
+                            .font(.callout)
+                            .foregroundStyle(NiumaPalette.ink)
+                            .textFieldStyle(.plain)
+                            .lineLimit(1...4)
+                            .submitLabel(.send)
+                            .focused(isPromptFocused)
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
+                            .disabled(isSending)
+                            .onSubmit {
+                                send()
+                            }
+                            .padding(.vertical, 3)
+                            .contentShape(Rectangle())
+                            .onTapGesture {
+                                closeAttachmentPanel()
+                                isPromptFocused.wrappedValue = true
+                            }
+                            .layoutPriority(1)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .accessibilityLabel("消息输入")
+                            .accessibilityIdentifier("thread-prompt-field")
+
                         Button {
-                            appModel.selectReasoningEffort(effort)
+                            speechTranscriber.toggle(
+                                currentPrompt: prompt,
+                                locale: Locale(identifier: appModel.localeIdentifier),
+                                updatePrompt: { transcript in
+                                    prompt = transcript
+                                },
+                                reportError: { message in
+                                    appModel.pendingError = message
+                                }
+                            )
                         } label: {
-                            if appModel.selectedReasoningEffort == effort {
-                                Label(effort.rawValue, systemImage: "checkmark")
-                            } else {
-                                Text(effort.rawValue)
+                            Group {
+                                if speechTranscriber.isPreparing || speechTranscriber.isFinalizing {
+                                    ProgressView()
+                                        .tint(NiumaPalette.mutedInk)
+                                } else {
+                                    Image(systemName: speechTranscriber.isRecording ? "mic.fill" : "mic")
+                                        .font(.system(size: 17, weight: .medium))
+                                }
                             }
+                            .foregroundStyle(speechTranscriber.isRecording ? NiumaPalette.critical : NiumaPalette.mutedInk)
+                            .frame(width: 30, height: 30)
                         }
-                    }
-                } label: {
-                    ComposerPill(title: appModel.selectedReasoningEffort.rawValue)
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel("选择思考深度")
-                .accessibilityIdentifier("thread-reasoning-effort-menu")
-                permissionMenu
-                Spacer()
-            }
+                        .buttonStyle(.plain)
+                        .disabled(isSending || speechTranscriber.isFinalizing)
+                        .accessibilityLabel(speechTranscriber.isRecording ? "停止语音输入" : "开始语音输入")
+                        .accessibilityIdentifier("thread-voice-input-button")
 
-            if !attachments.isEmpty {
-                ComposerAttachmentStrip(attachments: attachments, onRemove: onRemoveAttachment)
-            }
-
-            HStack(spacing: 10) {
-                Button(action: onAddAttachment) {
-                    Image(systemName: "plus")
-                        .font(.system(size: 17, weight: .medium))
-                        .foregroundStyle(NiumaPalette.ink)
-                        .frame(width: 34, height: 34)
-                        .contentShape(Circle())
-                }
-                .buttonStyle(.plain)
-                .disabled(isSending)
-                .accessibilityLabel("添加附件")
-                .accessibilityIdentifier("thread-attachment-button")
-
-                HStack(alignment: .bottom, spacing: 10) {
-                    TextField(placeholder, text: $prompt, axis: .vertical)
-                        .font(.callout)
-                        .foregroundStyle(NiumaPalette.ink)
-                        .textFieldStyle(.plain)
-                        .lineLimit(1...4)
-                        .submitLabel(.send)
-                        .focused(isPromptFocused)
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
-                        .disabled(isSending)
-                        .onSubmit {
+                        Button {
                             send()
-                        }
-                        .padding(.vertical, 3)
-                        .contentShape(Rectangle())
-                        .onTapGesture {
-                            isPromptFocused.wrappedValue = true
-                        }
-                        .layoutPriority(1)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .accessibilityLabel("消息输入")
-                        .accessibilityIdentifier("thread-prompt-field")
-
-                    Button {
-                        speechTranscriber.toggle(
-                            currentPrompt: prompt,
-                            locale: Locale(identifier: appModel.localeIdentifier),
-                            updatePrompt: { transcript in
-                                prompt = transcript
-                            },
-                            reportError: { message in
-                                appModel.pendingError = message
+                        } label: {
+                            Group {
+                                if isSending {
+                                    ProgressView()
+                                        .tint(.white)
+                                } else {
+                                    Image(systemName: "arrow.up")
+                                        .font(.system(size: 16, weight: .bold))
+                                }
                             }
-                        )
-                    } label: {
-                        Group {
-                            if speechTranscriber.isPreparing || speechTranscriber.isFinalizing {
-                                ProgressView()
-                                    .tint(NiumaPalette.mutedInk)
-                            } else {
-                                Image(systemName: speechTranscriber.isRecording ? "mic.fill" : "mic")
-                                    .font(.system(size: 17, weight: .medium))
-                            }
+                            .foregroundStyle(.white)
+                            .frame(width: 34, height: 34)
+                            .background(Circle().fill(.black))
+                            .contentShape(Circle())
                         }
-                        .foregroundStyle(speechTranscriber.isRecording ? NiumaPalette.critical : NiumaPalette.mutedInk)
-                        .frame(width: 30, height: 30)
+                        .buttonStyle(.plain)
+                        .disabled(!canSend)
+                        .opacity(canSend ? 1 : 0.45)
+                        .accessibilityLabel("发送")
+                        .accessibilityIdentifier("thread-send-button")
                     }
-                    .buttonStyle(.plain)
-                    .disabled(isSending || speechTranscriber.isFinalizing)
-                    .accessibilityLabel(speechTranscriber.isRecording ? "停止语音输入" : "开始语音输入")
-                    .accessibilityIdentifier("thread-voice-input-button")
-
-                    Button {
-                        send()
-                    } label: {
-                        Group {
-                            if isSending {
-                                ProgressView()
-                                    .tint(.white)
-                            } else {
-                                Image(systemName: "arrow.up")
-                                    .font(.system(size: 16, weight: .bold))
-                            }
-                        }
-                        .foregroundStyle(.white)
-                        .frame(width: 34, height: 34)
-                        .background(Circle().fill(.black))
-                        .contentShape(Circle())
-                    }
-                    .buttonStyle(.plain)
-                    .disabled(!canSend)
-                    .opacity(canSend ? 1 : 0.45)
-                    .accessibilityLabel("发送")
-                    .accessibilityIdentifier("thread-send-button")
                 }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 8)
+                .niumaGlassChrome(cornerRadius: 28)
             }
-            .padding(.horizontal, 14)
-            .padding(.vertical, 8)
-            .niumaGlassChrome(cornerRadius: 28)
+            .padding(.horizontal, 12)
+            .padding(.top, 8)
+            .padding(.bottom, isAttachmentPanelExpanded ? 8 : 10)
+
+            if isAttachmentPanelExpanded {
+                ComposerAttachmentPanel(
+                    photoTitle: L10n.string("attachment.media", language: appModel.appLanguage),
+                    fileTitle: L10n.string("attachment.file", language: appModel.appLanguage),
+                    onPickPhotoOrVideo: openPhotoPicker,
+                    onPickFile: openFilePicker
+                )
+                .transition(.move(edge: .bottom).combined(with: .opacity))
+            }
         }
-        .padding(.horizontal, 12)
-        .padding(.top, 8)
-        .padding(.bottom, 10)
-        .background(ThreadBottomFade())
+        .frame(maxWidth: .infinity)
+        .background(alignment: .bottom) {
+            if isAttachmentPanelExpanded {
+                NiumaPalette.neutralSoft
+                    .ignoresSafeArea(edges: .bottom)
+            } else {
+                ThreadBottomFade()
+            }
+        }
         .onDisappear {
             speechTranscriber.stop()
         }
@@ -184,9 +214,35 @@ struct ThreadComposerBar: View {
 
     private func send() {
         guard canSend else { return }
+        closeAttachmentPanel()
         speechTranscriber.stop()
         isPromptFocused.wrappedValue = false
         onSend()
+    }
+
+    private func toggleAttachmentPanel() {
+        guard !isSending else { return }
+        isPromptFocused.wrappedValue = false
+        withAnimation(.easeInOut(duration: 0.18)) {
+            isAttachmentPanelExpanded.toggle()
+        }
+    }
+
+    private func closeAttachmentPanel() {
+        guard isAttachmentPanelExpanded else { return }
+        withAnimation(.easeInOut(duration: 0.18)) {
+            isAttachmentPanelExpanded = false
+        }
+    }
+
+    private func openPhotoPicker() {
+        closeAttachmentPanel()
+        onPickPhotoOrVideo()
+    }
+
+    private func openFilePicker() {
+        closeAttachmentPanel()
+        onPickFile()
     }
 
     private var permissionMenu: some View {
@@ -304,6 +360,83 @@ struct ThreadComposerBar: View {
         case .dangerFullAccess:
             return "完全访问"
         }
+    }
+}
+
+/// WeChat-style attachment tray with only the two currently supported attachment sources.
+private struct ComposerAttachmentPanel: View {
+    let photoTitle: String
+    let fileTitle: String
+    let onPickPhotoOrVideo: () -> Void
+    let onPickFile: () -> Void
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 18) {
+            ComposerAttachmentTile(
+                title: photoTitle,
+                systemImage: "photo.on.rectangle",
+                action: onPickPhotoOrVideo
+            )
+            ComposerAttachmentTile(
+                title: fileTitle,
+                systemImage: "doc",
+                action: onPickFile
+            )
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 22)
+        .padding(.top, 14)
+        .padding(.bottom, 24)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            ZStack(alignment: .top) {
+                Rectangle()
+                    .fill(NiumaPalette.neutralSoft)
+                Rectangle()
+                    .fill(NiumaPalette.border)
+                    .frame(height: 1)
+            }
+        )
+        .accessibilityIdentifier("thread-attachment-panel")
+    }
+}
+
+private struct ComposerAttachmentTile: View {
+    let title: String
+    let systemImage: String
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            VStack(alignment: .center, spacing: 7) {
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .fill(NiumaPalette.card.opacity(0.94))
+                    .frame(width: 46, height: 46)
+                    .overlay(
+                        Image(systemName: systemImage)
+                            .font(.system(size: 18, weight: .medium))
+                            .foregroundStyle(NiumaPalette.ink)
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 18, style: .continuous)
+                            .stroke(NiumaPalette.border, lineWidth: 1)
+                    )
+
+                Text(title)
+                    .font(.caption2.weight(.medium))
+                    .foregroundStyle(NiumaPalette.mutedInk)
+                    .lineLimit(2)
+                    .multilineTextAlignment(.center)
+                    .minimumScaleFactor(0.82)
+                    .frame(width: 76, alignment: .top)
+                    .frame(minHeight: 28, alignment: .top)
+            }
+            .frame(width: 76, alignment: .top)
+            .frame(minHeight: 84, alignment: .top)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(title)
     }
 }
 

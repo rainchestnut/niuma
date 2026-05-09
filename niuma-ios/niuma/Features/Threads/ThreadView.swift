@@ -22,7 +22,6 @@ struct ThreadView: View {
     @State private var expandedProcessGroupIDs: Set<String> = []
     @State private var selectedPhotoItem: PhotosPickerItem?
     @State private var pendingAttachments: [OutgoingAttachment] = []
-    @State private var isShowingAttachmentOptions = false
     @State private var isShowingBranchChanges = false
     @State private var isPickingPhotoMedia = false
     @State private var isImportingFile = false
@@ -117,19 +116,6 @@ struct ThreadView: View {
                 selection: $selectedPhotoItem,
                 matching: .any(of: [.images, .videos])
             )
-            .confirmationDialog(
-                L10n.string("attachment.add.title", language: appModel.appLanguage),
-                isPresented: $isShowingAttachmentOptions,
-                titleVisibility: .visible
-            ) {
-                Button(L10n.string("attachment.add.media", language: appModel.appLanguage)) {
-                    isPickingPhotoMedia = true
-                }
-                Button(L10n.string("attachment.add.file", language: appModel.appLanguage)) {
-                    isImportingFile = true
-                }
-                Button(L10n.string("common.cancel", language: appModel.appLanguage), role: .cancel) {}
-            }
             .sheet(isPresented: $isShowingBranchChanges) {
                 BranchChangesSheet(session: session)
             }
@@ -287,8 +273,11 @@ struct ThreadView: View {
             attachments: pendingAttachments,
             isSending: false,
             isPromptFocused: $isPromptFocused,
-            onAddAttachment: {
-                isShowingAttachmentOptions = true
+            onPickPhotoOrVideo: {
+                isPickingPhotoMedia = true
+            },
+            onPickFile: {
+                isImportingFile = true
             },
             onRemoveAttachment: { attachment in
                 pendingAttachments.removeAll { $0.id == attachment.id }

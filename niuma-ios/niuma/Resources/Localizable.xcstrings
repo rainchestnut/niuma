@@ -19,22 +19,16 @@
         "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "%d 待审批" } }
       }
     },
-    "attachment.add.file" : {
+    "attachment.file" : {
       "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "Add File" } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "添加文件" } }
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "File" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "文件" } }
       }
     },
-    "attachment.add.media" : {
+    "attachment.media" : {
       "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "Add Photo or Video" } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "添加图片或视频" } }
-      }
-    },
-    "attachment.add.title" : {
-      "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "Add Attachment" } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "添加附件" } }
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Photo" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "照片" } }
       }
     },
     "attachment.loading" : {

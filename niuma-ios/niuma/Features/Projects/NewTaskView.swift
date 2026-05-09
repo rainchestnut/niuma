@@ -14,7 +14,6 @@ struct NewTaskView: View {
     @State private var isSubmitting = false
     @State private var selectedPhotoItem: PhotosPickerItem?
     @State private var pendingAttachments: [OutgoingAttachment] = []
-    @State private var isShowingAttachmentOptions = false
     @State private var isPickingPhotoMedia = false
     @State private var isImportingFile = false
     @FocusState private var isPromptFocused: Bool
@@ -85,15 +84,6 @@ struct NewTaskView: View {
             selection: $selectedPhotoItem,
             matching: .any(of: [.images, .videos])
         )
-        .confirmationDialog("添加附件", isPresented: $isShowingAttachmentOptions, titleVisibility: .visible) {
-            Button("添加图片或视频") {
-                isPickingPhotoMedia = true
-            }
-            Button("添加文件") {
-                isImportingFile = true
-            }
-            Button("取消", role: .cancel) {}
-        }
         .onChange(of: selectedPhotoItem) { _, newItem in
             guard let newItem else { return }
             Task { await loadPhotoAttachment(newItem) }
@@ -137,8 +127,11 @@ struct NewTaskView: View {
             attachments: pendingAttachments,
             isSending: isSubmitting,
             isPromptFocused: $isPromptFocused,
-            onAddAttachment: {
-                isShowingAttachmentOptions = true
+            onPickPhotoOrVideo: {
+                isPickingPhotoMedia = true
+            },
+            onPickFile: {
+                isImportingFile = true
             },
             onRemoveAttachment: { attachment in
                 pendingAttachments.removeAll { $0.id == attachment.id }
