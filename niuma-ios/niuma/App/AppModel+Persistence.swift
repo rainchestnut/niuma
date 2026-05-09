@@ -36,6 +36,7 @@ extension AppModel {
         threadRefreshStates.removeValue(forKey: threadID)
         transientOutgoingEntries.removeValue(forKey: threadID)
         branchChangesByThread.removeValue(forKey: threadID)
+        archivingThreadIDs.remove(threadID)
         threadRefreshTimeoutTasks.removeValue(forKey: threadID)?.cancel()
     }
 

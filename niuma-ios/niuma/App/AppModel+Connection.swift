@@ -252,6 +252,13 @@ extension AppModel {
                 pendingError = result.error ?? "branch changes failed"
             }
 
+        case .threadArchiveResult(let result):
+            logger.info("thread_archive_result request_id=\(result.requestID, privacy: .public) thread_id=\(result.threadID, privacy: .public) succeeded=\(result.succeeded, privacy: .public)")
+            archivingThreadIDs.remove(result.threadID)
+            if !result.succeeded {
+                pendingError = result.error ?? "thread archive failed"
+            }
+
         case .approvalRequest(let approval):
             runtimeState = .waitingApproval
             if let index = approvals.firstIndex(where: { $0.approvalID == approval.approvalID }) {

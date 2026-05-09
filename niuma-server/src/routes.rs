@@ -598,6 +598,28 @@ async fn handle_mobile_text(
             payload["source"] = json!("mobile");
             route_to_agent_or_error(state, tx, &query.agent_id, payload, None).await
         }
+        "thread_archive_request" => {
+            let request_id = payload
+                .get("request_id")
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned);
+            let thread_id = payload
+                .get("thread_id")
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned);
+            payload["device_id"] = json!(query.device_id);
+            payload["source"] = json!("mobile");
+            route_thread_archive_to_agent_or_error(
+                state,
+                tx,
+                &query.agent_id,
+                payload,
+                request_id,
+                thread_id,
+                &query.device_id,
+            )
+            .await
+        }
         "approval_response" => {
             let approval_id = payload
                 .get("approval_id")
@@ -621,6 +643,32 @@ async fn handle_mobile_text(
         }
         _ => Err(format!("unsupported mobile message kind={kind}")),
     }
+}
+
+async fn route_thread_archive_to_agent_or_error(
+    state: &AppState,
+    tx: &mpsc::UnboundedSender<Message>,
+    agent_id: &str,
+    payload: Value,
+    request_id: Option<String>,
+    thread_id: Option<String>,
+    device_id: &str,
+) -> Result<(), String> {
+    let delivered = state.hub.send_to_agent(agent_id, payload).await;
+    tracing::info!(agent_id = %agent_id, delivered, "ws_route_to_agent");
+    if !delivered {
+        send_json(
+            tx,
+            json!({
+                "kind": "thread_archive_failed",
+                "device_id": device_id,
+                "request_id": request_id.unwrap_or_default(),
+                "thread_id": thread_id.unwrap_or_default(),
+                "error": "desktop agent is offline",
+            }),
+        );
+    }
+    Ok(())
 }
 
 async fn route_approval_response_to_agent_or_error(
@@ -728,6 +776,8 @@ async fn handle_agent_text(
         | "metadata_refresh_failed"
         | "branch_changes_result"
         | "branch_changes_failed"
+        | "thread_archive_result"
+        | "thread_archive_failed"
         | "approval_request"
         | "approval_response_failed"
         | "user_input_request" => {
@@ -1004,6 +1054,64 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn mobile_thread_archive_request_routes_to_gateway() {
+        let state = test_state();
+        let (agent_tx, mut agent_rx) = mpsc::unbounded_channel();
+        state.hub.connect_agent("agent-1", agent_tx).await;
+        let (mobile_tx, mut mobile_rx) = mpsc::unbounded_channel();
+        let query = MobileWsQuery {
+            device_id: "ios-device".to_string(),
+            agent_id: "agent-1".to_string(),
+            session_token: "session-token".to_string(),
+        };
+        let request = json!({
+            "kind": "thread_archive_request",
+            "request_id": "archive-1",
+            "device_id": "spoofed-device",
+            "thread_id": "thread-1"
+        });
+
+        handle_mobile_text(&state, &query, &mobile_tx, &request.to_string())
+            .await
+            .expect("route archive request");
+
+        let routed = recv_json(&mut agent_rx).await;
+        assert_eq!(routed["kind"], "thread_archive_request");
+        assert_eq!(routed["request_id"], "archive-1");
+        assert_eq!(routed["device_id"], "ios-device");
+        assert_eq!(routed["thread_id"], "thread-1");
+        assert_eq!(routed["source"], "mobile");
+        assert!(mobile_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn mobile_thread_archive_request_reports_offline_gateway() {
+        let state = test_state();
+        let (mobile_tx, mut mobile_rx) = mpsc::unbounded_channel();
+        let query = MobileWsQuery {
+            device_id: "ios-device".to_string(),
+            agent_id: "agent-offline".to_string(),
+            session_token: "session-token".to_string(),
+        };
+        let request = json!({
+            "kind": "thread_archive_request",
+            "request_id": "archive-1",
+            "thread_id": "thread-1"
+        });
+
+        handle_mobile_text(&state, &query, &mobile_tx, &request.to_string())
+            .await
+            .expect("offline archive request reports failure to mobile");
+
+        let routed = recv_json(&mut mobile_rx).await;
+        assert_eq!(routed["kind"], "thread_archive_failed");
+        assert_eq!(routed["request_id"], "archive-1");
+        assert_eq!(routed["device_id"], "ios-device");
+        assert_eq!(routed["thread_id"], "thread-1");
+        assert_eq!(routed["error"], "desktop agent is offline");
+    }
+
+    #[tokio::test]
     async fn mobile_approval_response_reports_offline_gateway() {
         let state = test_state();
         let (mobile_tx, mut mobile_rx) = mpsc::unbounded_channel();
@@ -1036,6 +1144,16 @@ mod tests {
     #[tokio::test]
     async fn agent_branch_changes_failed_routes_to_mobile() {
         assert_agent_branch_changes_routes_to_mobile("branch_changes_failed").await;
+    }
+
+    #[tokio::test]
+    async fn agent_thread_archive_result_routes_to_mobile() {
+        assert_agent_thread_archive_routes_to_mobile("thread_archive_result").await;
+    }
+
+    #[tokio::test]
+    async fn agent_thread_archive_failed_routes_to_mobile() {
+        assert_agent_thread_archive_routes_to_mobile("thread_archive_failed").await;
     }
 
     #[tokio::test]
@@ -1150,6 +1268,36 @@ mod tests {
         assert_eq!(routed["request_id"], "request-1");
         assert_eq!(routed["thread_id"], "thread-1");
         assert_eq!(routed["ciphertext"], "encrypted-payload");
+        assert_eq!(routed["source"], "agent");
+        assert_eq!(routed["agent_id"], "agent-1");
+        assert!(agent_rx.try_recv().is_err());
+    }
+
+    async fn assert_agent_thread_archive_routes_to_mobile(kind: &str) {
+        let state = test_state();
+        let (mobile_tx, mut mobile_rx) = mpsc::unbounded_channel();
+        state
+            .hub
+            .connect_mobile("ios-device", "agent-1", mobile_tx)
+            .await;
+        let (agent_tx, mut agent_rx) = mpsc::unbounded_channel();
+        let response = json!({
+            "kind": kind,
+            "device_id": "ios-device",
+            "request_id": "archive-1",
+            "thread_id": "thread-1",
+            "error": "boom"
+        });
+
+        handle_agent_text(&state, "agent-1", &agent_tx, &response.to_string())
+            .await
+            .expect("route archive response");
+
+        let routed = recv_json(&mut mobile_rx).await;
+        assert_eq!(routed["kind"], kind);
+        assert_eq!(routed["device_id"], "ios-device");
+        assert_eq!(routed["request_id"], "archive-1");
+        assert_eq!(routed["thread_id"], "thread-1");
         assert_eq!(routed["source"], "agent");
         assert_eq!(routed["agent_id"], "agent-1");
         assert!(agent_rx.try_recv().is_err());

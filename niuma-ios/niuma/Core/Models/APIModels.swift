@@ -169,6 +169,18 @@ struct BranchChangesRequestData: Encodable {
     }
 }
 
+struct ThreadArchiveRequestData: Encodable {
+    let requestID: String
+    let deviceID: String
+    let threadID: String
+
+    enum CodingKeys: String, CodingKey {
+        case requestID = "request_id"
+        case deviceID = "device_id"
+        case threadID = "thread_id"
+    }
+}
+
 struct ResumeThreadRequestData: Encodable {
     let threadID: String
     let cursor: Int

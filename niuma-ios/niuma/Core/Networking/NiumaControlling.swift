@@ -64,6 +64,11 @@ protocol NiumaControlling: AnyObject {
     ///   - request: Thread id plus optional base ref used by the desktop gateway.
     func requestBranchChanges(request: BranchChangesRequestData) async throws
 
+    /// Requests that the desktop gateway archives one Codex thread.
+    /// - Parameters:
+    ///   - request: Thread id and request id used to route the archive result.
+    func requestThreadArchive(request: ThreadArchiveRequestData) async throws
+
     /// Sends a user task-start request to the paired desktop agent.
     /// - Parameters:
     ///   - request: `TaskStartRequestData` containing routing ids, payload ciphertext, and mobile signature.

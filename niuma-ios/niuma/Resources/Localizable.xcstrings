@@ -247,6 +247,48 @@
         "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "刷新超时" } }
       }
     },
+    "session.actions.accessibility" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Session Actions" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "会话操作" } }
+      }
+    },
+    "session.archive.action" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Archive" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "归档" } }
+      }
+    },
+    "session.archive.confirm.message" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "This archives the Codex thread on the desktop. It will disappear from the mobile session list after Codex confirms the archive." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "这会在桌面 Codex 中归档该会话。Codex 确认归档后，它会从移动端 session 列表中消失。" } }
+      }
+    },
+    "session.archive.confirm.title" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Archive Session?" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "归档 session？" } }
+      }
+    },
+    "session.reset.action" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Reset History" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "重置历史" } }
+      }
+    },
+    "session.reset.confirm.message" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "This only clears the local mobile cache. It does not change desktop Codex history or server records. Reopen details to sync again." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "这不会影响桌面 Codex 历史或服务端记录，只会清空本机缓存。重新进入详情会重新同步。" } }
+      }
+    },
+    "session.reset.confirm.title" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Reset History?" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "重置历史？" } }
+      }
+    },
     "thread.branch_changes.view" : {
       "localizations" : {
         "en" : { "stringUnit" : { "state" : "translated", "value" : "View Branch Changes" } },

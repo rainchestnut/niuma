@@ -218,6 +218,18 @@ final class LiveNiumaController: NiumaControlling {
         )
     }
 
+    func requestThreadArchive(request: ThreadArchiveRequestData) async throws {
+        logger.info("mobile_ws_thread_archive_send request_id=\(request.requestID, privacy: .public) thread_id=\(request.threadID, privacy: .public)")
+        try await sendWebSocket(
+            LiveThreadArchiveRequestMessage(
+                kind: "thread_archive_request",
+                requestID: request.requestID,
+                deviceID: request.deviceID,
+                threadID: request.threadID
+            )
+        )
+    }
+
     func resumeThread(request: ResumeThreadRequestData) async throws {
         let payload = LiveResumeThreadMessage(
             kind: "resume_thread",

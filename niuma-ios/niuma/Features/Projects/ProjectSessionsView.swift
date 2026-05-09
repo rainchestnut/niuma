@@ -6,6 +6,8 @@ struct ProjectSessionsView: View {
     let project: ProjectSummary
     @State private var resetCandidate: ThreadSummary?
     @State private var isShowingResetConfirmation = false
+    @State private var archiveCandidate: ThreadSummary?
+    @State private var isShowingArchiveConfirmation = false
 
     var body: some View {
         ScrollView {
@@ -72,9 +74,14 @@ struct ProjectSessionsView: View {
                                 SessionRow(
                                     project: project,
                                     session: session,
+                                    isArchiving: appModel.archivingThreadIDs.contains(session.threadID),
                                     onResetHistory: {
                                         resetCandidate = session
                                         isShowingResetConfirmation = true
+                                    },
+                                    onArchive: {
+                                        archiveCandidate = session
+                                        isShowingArchiveConfirmation = true
                                     }
                                 )
                             }
@@ -89,28 +96,50 @@ struct ProjectSessionsView: View {
         .niumaScreenBackground()
         .navigationTitle(project.projectName)
         .navigationBarTitleDisplayMode(.inline)
-        .alert("重置历史？", isPresented: $isShowingResetConfirmation) {
-            Button("取消", role: .cancel) {
+        .alert(
+            L10n.string("session.reset.confirm.title", language: appModel.appLanguage),
+            isPresented: $isShowingResetConfirmation
+        ) {
+            Button(L10n.string("common.cancel", language: appModel.appLanguage), role: .cancel) {
                 resetCandidate = nil
             }
-            Button("重置历史", role: .destructive) {
+            Button(L10n.string("session.reset.action", language: appModel.appLanguage), role: .destructive) {
                 if let resetCandidate {
                     appModel.resetLocalHistory(for: resetCandidate)
                 }
                 resetCandidate = nil
             }
         } message: {
-            Text("这不会影响桌面 Codex 历史或服务端记录，只会清空本机缓存。重新进入详情会重新同步。")
+            Text(L10n.string("session.reset.confirm.message", language: appModel.appLanguage))
+        }
+        .alert(
+            L10n.string("session.archive.confirm.title", language: appModel.appLanguage),
+            isPresented: $isShowingArchiveConfirmation
+        ) {
+            Button(L10n.string("common.cancel", language: appModel.appLanguage), role: .cancel) {
+                archiveCandidate = nil
+            }
+            Button(L10n.string("session.archive.action", language: appModel.appLanguage), role: .destructive) {
+                if let archiveCandidate {
+                    Task { await appModel.archiveThread(archiveCandidate) }
+                }
+                archiveCandidate = nil
+            }
+        } message: {
+            Text(L10n.string("session.archive.confirm.message", language: appModel.appLanguage))
         }
     }
 }
 
 private struct SessionRow: View {
+    @Environment(AppModel.self) private var appModel
     @State private var isShowingActions = false
 
     let project: ProjectSummary
     let session: ThreadSummary
+    let isArchiving: Bool
     let onResetHistory: () -> Void
+    let onArchive: () -> Void
 
     var body: some View {
         ZStack(alignment: .topTrailing) {
@@ -128,29 +157,45 @@ private struct SessionRow: View {
                         isShowingActions.toggle()
                     }
                 } label: {
-                    Image(systemName: "ellipsis")
-                        .font(.system(size: 13, weight: .semibold))
-                        .foregroundStyle(isShowingActions ? NiumaPalette.ink : NiumaPalette.mutedInk)
-                        .frame(width: 30, height: 30)
-                        .background(
-                            Circle()
-                                .fill(isShowingActions ? NiumaPalette.card : NiumaPalette.neutralSoft)
-                        )
+                    Group {
+                        if isArchiving {
+                            ProgressView()
+                                .tint(NiumaPalette.mutedInk)
+                        } else {
+                            Image(systemName: "ellipsis")
+                                .font(.system(size: 13, weight: .semibold))
+                        }
+                    }
+                    .foregroundStyle(isShowingActions ? NiumaPalette.ink : NiumaPalette.mutedInk)
+                    .frame(width: 30, height: 30)
+                    .background(
+                        Circle()
+                            .fill(isShowingActions ? NiumaPalette.card : NiumaPalette.neutralSoft)
+                    )
                 }
                 .buttonStyle(.plain)
-                .accessibilityLabel("Session 操作")
+                .disabled(isArchiving)
+                .accessibilityLabel(L10n.string("session.actions.accessibility", language: appModel.appLanguage))
             }
 
             if isShowingActions {
                 SessionActionList(
+                    language: appModel.appLanguage,
+                    isArchiving: isArchiving,
                     onResetHistory: {
                         withAnimation(.spring(response: 0.18, dampingFraction: 0.9)) {
                             isShowingActions = false
                         }
                         onResetHistory()
+                    },
+                    onArchive: {
+                        withAnimation(.spring(response: 0.18, dampingFraction: 0.9)) {
+                            isShowingActions = false
+                        }
+                        onArchive()
                     }
                 )
-                .frame(width: 156)
+                .frame(width: 168)
                 .offset(x: -38, y: 38)
                 .transition(.opacity.combined(with: .scale(scale: 0.98, anchor: .topTrailing)))
                 .zIndex(1)
@@ -164,6 +209,7 @@ private struct SessionRow: View {
                 .fill(NiumaPalette.raisedCard)
         )
         .contentShape(Rectangle())
+        .padding(.bottom, isShowingActions ? 56 : 0)
         .zIndex(isShowingActions ? 10 : 0)
     }
 }
@@ -213,14 +259,25 @@ private struct SessionRowContent: View {
 }
 
 private struct SessionActionList: View {
+    let language: AppLanguage
+    let isArchiving: Bool
     let onResetHistory: () -> Void
+    let onArchive: () -> Void
 
     var body: some View {
-        VStack(spacing: 0) {
+        VStack(spacing: 4) {
             SessionActionRow(
-                title: "重置历史",
+                title: L10n.string("session.reset.action", language: language),
                 systemImage: "arrow.counterclockwise",
+                tone: .neutral,
                 action: onResetHistory
+            )
+            SessionActionRow(
+                title: L10n.string("session.archive.action", language: language),
+                systemImage: "archivebox",
+                tone: .destructive,
+                isDisabled: isArchiving,
+                action: onArchive
             )
         }
         .padding(6)
@@ -229,7 +286,7 @@ private struct SessionActionList: View {
                 .fill(NiumaPalette.card)
                 .overlay(
                     RoundedRectangle(cornerRadius: 14, style: .continuous)
-                        .stroke(NiumaPalette.critical.opacity(0.14), lineWidth: 1)
+                        .stroke(NiumaPalette.neutralSoft, lineWidth: 1)
                 )
         )
         .shadow(color: .black.opacity(0.08), radius: 16, x: 0, y: 10)
@@ -239,6 +296,8 @@ private struct SessionActionList: View {
 private struct SessionActionRow: View {
     let title: String
     let systemImage: String
+    let tone: SessionActionTone
+    var isDisabled = false
     let action: () -> Void
 
     var body: some View {
@@ -246,12 +305,12 @@ private struct SessionActionRow: View {
             HStack(spacing: 9) {
                 Image(systemName: systemImage)
                     .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(NiumaPalette.critical)
+                    .foregroundStyle(tone.foreground)
                     .frame(width: 24, height: 24)
-                    .background(Circle().fill(NiumaPalette.criticalSoft))
+                    .background(Circle().fill(tone.background))
                 Text(title)
                     .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(NiumaPalette.critical)
+                    .foregroundStyle(tone.foreground)
                 Spacer()
             }
             .padding(.horizontal, 8)
@@ -259,11 +318,36 @@ private struct SessionActionRow: View {
             .frame(height: 40)
             .background(
                 RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .fill(NiumaPalette.criticalSoft.opacity(0.38))
+                    .fill(tone.background.opacity(0.38))
             )
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .disabled(isDisabled)
+        .opacity(isDisabled ? 0.55 : 1)
+    }
+}
+
+private enum SessionActionTone {
+    case neutral
+    case destructive
+
+    var foreground: Color {
+        switch self {
+        case .neutral:
+            return NiumaPalette.ink
+        case .destructive:
+            return NiumaPalette.critical
+        }
+    }
+
+    var background: Color {
+        switch self {
+        case .neutral:
+            return NiumaPalette.neutralSoft
+        case .destructive:
+            return NiumaPalette.criticalSoft
+        }
     }
 }
 

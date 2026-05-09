@@ -173,6 +173,26 @@ enum LiveRealtimeEventDecoder {
                     error: result.error
                 )
             )
+        case "thread_archive_result":
+            let result = try decoder.decode(LiveThreadArchiveResultMessage.self, from: data)
+            return .threadArchiveResult(
+                ThreadArchiveResult(
+                    requestID: result.requestID,
+                    threadID: result.threadID,
+                    succeeded: true,
+                    error: nil
+                )
+            )
+        case "thread_archive_failed":
+            let result = try decoder.decode(LiveThreadArchiveResultMessage.self, from: data)
+            return .threadArchiveResult(
+                ThreadArchiveResult(
+                    requestID: result.requestID,
+                    threadID: result.threadID,
+                    succeeded: false,
+                    error: result.error
+                )
+            )
         case "approval_request":
             let approval = try decoder.decode(LiveApprovalRequestMessage.self, from: data)
             let approvalPlaintext = try PayloadCryptoService.decrypt(

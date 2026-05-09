@@ -222,6 +222,18 @@ impl CodexAppServerClient {
             .context("thread/resume response missing thread")
     }
 
+    /// Archive a Codex thread through the app-server source of truth.
+    pub async fn archive_thread(&self, thread_id: &str) -> Result<()> {
+        self.request(
+            "thread/archive",
+            json!({
+                "threadId": thread_id,
+            }),
+        )
+        .await?;
+        Ok(())
+    }
+
     /// Start a user turn with Codex-native input items.
     pub async fn start_turn_payload(
         &self,

@@ -75,6 +75,20 @@ nonisolated struct LiveBranchChangesRequestMessage: Encodable {
     }
 }
 
+nonisolated struct LiveThreadArchiveRequestMessage: Encodable {
+    let kind: String
+    let requestID: String
+    let deviceID: String
+    let threadID: String
+
+    enum CodingKeys: String, CodingKey {
+        case kind
+        case requestID = "request_id"
+        case deviceID = "device_id"
+        case threadID = "thread_id"
+    }
+}
+
 nonisolated struct LiveProjectSyncMessage: Decodable {
     let projectID: String
     let projectName: String
@@ -261,6 +275,20 @@ nonisolated struct BranchChangesResultPlaintext: Decodable {
 
 nonisolated struct BranchChangesFailedPlaintext: Decodable {
     let error: String
+}
+
+nonisolated struct LiveThreadArchiveResultMessage: Decodable {
+    let requestID: String
+    let deviceID: String
+    let threadID: String
+    let error: String?
+
+    enum CodingKeys: String, CodingKey {
+        case requestID = "request_id"
+        case deviceID = "device_id"
+        case threadID = "thread_id"
+        case error
+    }
 }
 
 nonisolated struct LiveApprovalRequestMessage: Decodable {

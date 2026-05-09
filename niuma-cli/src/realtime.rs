@@ -66,6 +66,13 @@ struct BranchChangesRequest {
     base_ref: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+struct ThreadArchiveRequest {
+    request_id: String,
+    device_id: String,
+    thread_id: String,
+}
+
 #[derive(Debug, Serialize)]
 struct PairHandshakeAck {
     kind: &'static str,
@@ -295,6 +302,16 @@ where
                 identity,
                 codex_app_server.as_ref(),
                 transfer_context.as_ref(),
+                inbound,
+            )
+            .await?;
+        }
+        Some("thread_archive_request") => {
+            let inbound: ThreadArchiveRequest = serde_json::from_value(value)?;
+            handle_thread_archive_request(
+                writer,
+                codex_app_server.as_ref(),
+                active_threads,
                 inbound,
             )
             .await?;
@@ -566,6 +583,81 @@ fn branch_changes_wire(
         "thread_id": inbound.thread_id.clone(),
         "ciphertext": ciphertext,
     }))
+}
+
+async fn handle_thread_archive_request<S, E>(
+    writer: &mut S,
+    app_server: Option<&CodexAppServerClient>,
+    active_threads: Arc<RwLock<HashMap<String, ActiveThread>>>,
+    inbound: ThreadArchiveRequest,
+) -> Result<()>
+where
+    S: Sink<Message, Error = E> + Unpin,
+    E: std::error::Error + Send + Sync + 'static,
+{
+    let result = archive_thread_payload(app_server, active_threads, &inbound).await;
+    match result {
+        Ok(messages) => {
+            for message in messages {
+                send_wire_message(writer, message).await?;
+            }
+        }
+        Err(err) => {
+            warn!(
+                "thread_archive_request failed thread_id={} request_id={}: {err:#}",
+                inbound.thread_id, inbound.request_id
+            );
+            send_wire_message(
+                writer,
+                thread_archive_failed_wire(&inbound, &err.to_string()),
+            )
+            .await?;
+        }
+    }
+    Ok(())
+}
+
+/// Archives the source Codex thread and returns the mobile acknowledgement plus
+/// the canonical archived metadata projection.
+async fn archive_thread_payload(
+    app_server: Option<&CodexAppServerClient>,
+    active_threads: Arc<RwLock<HashMap<String, ActiveThread>>>,
+    inbound: &ThreadArchiveRequest,
+) -> Result<Vec<Value>> {
+    let app_server = app_server.context("codex app-server is unavailable")?;
+    app_server.archive_thread(&inbound.thread_id).await?;
+    let mut messages = vec![thread_archive_result_wire(inbound)];
+    messages.extend(
+        metadata_syncs_for_thread_id(
+            Some(app_server),
+            active_threads,
+            &inbound.thread_id,
+            Some("archived".to_string()),
+        )
+        .await?,
+    );
+    Ok(messages)
+}
+
+/// Builds the plain acknowledgement for a successful mobile archive request.
+fn thread_archive_result_wire(inbound: &ThreadArchiveRequest) -> Value {
+    json!({
+        "kind": "thread_archive_result",
+        "device_id": inbound.device_id.clone(),
+        "request_id": inbound.request_id.clone(),
+        "thread_id": inbound.thread_id.clone(),
+    })
+}
+
+/// Builds the plain failure envelope when the archive request cannot reach Codex.
+fn thread_archive_failed_wire(inbound: &ThreadArchiveRequest, error: &str) -> Value {
+    json!({
+        "kind": "thread_archive_failed",
+        "device_id": inbound.device_id.clone(),
+        "request_id": inbound.request_id.clone(),
+        "thread_id": inbound.thread_id.clone(),
+        "error": error,
+    })
 }
 
 async fn handle_app_server_notification<S, E>(
@@ -1958,9 +2050,9 @@ mod tests {
     use tokio::sync::RwLock;
 
     use super::{
-        ActiveThread, ApprovalResponseInbound, PendingApproval, agent_ws_url,
+        ActiveThread, ApprovalResponseInbound, PendingApproval, ThreadArchiveRequest, agent_ws_url,
         claim_task_progress_push, handle_approval_response, task_progress_push_marker,
-        thread_sync_completed,
+        thread_archive_failed_wire, thread_archive_result_wire, thread_sync_completed,
     };
 
     #[test]
@@ -2088,6 +2180,28 @@ mod tests {
         }));
 
         assert_eq!(marker, None);
+    }
+
+    #[test]
+    fn thread_archive_acknowledgements_preserve_mobile_request_ids() {
+        let request = ThreadArchiveRequest {
+            request_id: "archive-1".to_string(),
+            device_id: "ios-device".to_string(),
+            thread_id: "thread-1".to_string(),
+        };
+
+        let success = thread_archive_result_wire(&request);
+        assert_eq!(success["kind"], "thread_archive_result");
+        assert_eq!(success["request_id"], "archive-1");
+        assert_eq!(success["device_id"], "ios-device");
+        assert_eq!(success["thread_id"], "thread-1");
+
+        let failed = thread_archive_failed_wire(&request, "boom");
+        assert_eq!(failed["kind"], "thread_archive_failed");
+        assert_eq!(failed["request_id"], "archive-1");
+        assert_eq!(failed["device_id"], "ios-device");
+        assert_eq!(failed["thread_id"], "thread-1");
+        assert_eq!(failed["error"], "boom");
     }
 
     #[tokio::test]

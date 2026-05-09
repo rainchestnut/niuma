@@ -2,6 +2,41 @@ import Foundation
 import OSLog
 
 extension AppModel {
+    /// Sends a Codex app-server archive request and waits for archived
+    /// `thread_sync` to remove the row from local projections.
+    func archiveThread(_ thread: ThreadSummary) async {
+        guard let identity, let selectedAgent else { return }
+        guard !archivingThreadIDs.contains(thread.threadID) else { return }
+        archivingThreadIDs.insert(thread.threadID)
+        do {
+            let controller = try requireController()
+            let sessionToken = try await authenticate(identity: identity, agent: selectedAgent)
+            controller.updateSessionToken(sessionToken)
+            await ensureRealtimeConnected(
+                deviceID: identity.deviceID,
+                agentID: selectedAgent.agentID,
+                sessionToken: sessionToken,
+                forceReconnect: connectionState != .connected
+            )
+            guard connectionState == .connected else {
+                throw AppModelError.realtimeNotConnected
+            }
+            let requestID = UUID().uuidString.lowercased()
+            try await withTimeout(realtimeSendTimeout) {
+                try await controller.requestThreadArchive(
+                    request: ThreadArchiveRequestData(
+                        requestID: requestID,
+                        deviceID: identity.deviceID,
+                        threadID: thread.threadID
+                    )
+                )
+            }
+        } catch {
+            archivingThreadIDs.remove(thread.threadID)
+            pendingError = error.localizedDescription
+        }
+    }
+
     func refreshBranchChanges(threadID: String, baseRef: String? = nil) async {
         guard let identity, let selectedAgent else { return }
         do {
