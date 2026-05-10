@@ -1,0 +1,173 @@
+const serverInput = document.getElementById("server-url");
+const configMessage = document.getElementById("config-message");
+
+async function fetchText(path, options = {}) {
+  const response = await fetch(path, { cache: "no-store", ...options });
+  const text = await response.text();
+  if (!response.ok) {
+    try {
+      const value = JSON.parse(text);
+      throw new Error(value.detail || text);
+    } catch (error) {
+      if (error instanceof SyntaxError) throw new Error(text || response.statusText);
+      throw error;
+    }
+  }
+  return text;
+}
+
+async function fetchJSON(path, options = {}) {
+  const text = await fetchText(path, options);
+  return JSON.parse(text);
+}
+
+function pretty(value) {
+  return JSON.stringify(value, null, 2);
+}
+
+function formatTime(timestamp) {
+  if (!timestamp) return "-";
+  return new Date(timestamp * 1000).toLocaleString();
+}
+
+function setText(id, value) {
+  document.getElementById(id).textContent = value ?? "-";
+}
+
+function setPill(id, ok, text) {
+  const element = document.getElementById(id);
+  element.className = `pill ${ok ? "ok" : "bad"}`;
+  element.textContent = text;
+}
+
+function setNotice(text, tone = "") {
+  configMessage.className = `notice ${tone}`;
+  configMessage.textContent = text;
+}
+
+function renderStatus(status) {
+  setText("gateway-mode", status.mode);
+  document.getElementById("gateway-mode").className = "pill ok";
+  setPill("server-state", status.server_connected, status.server_connected ? "connected" : "offline");
+  setPill("pairing-state", status.pairing_payload_ready, status.pairing_payload_ready ? "ready" : "not ready");
+  setText("pair-expiry", formatTime(status.pair_token_expires_at));
+  setText("device-name", status.device_name);
+  setText("agent-id", status.agent_id);
+  setText("active-server-url", status.server_url);
+  setText("config-path", status.config_path);
+  setText("saved-server-url", status.saved_server_url || "-");
+  setText("server-source", status.server_url_source);
+  document.getElementById("server-source").className =
+    status.server_url_source === "cli" || status.server_url_source === "env" ? "pill warn" : "pill ok";
+  if (document.activeElement !== serverInput && !serverInput.dataset.dirty) {
+    serverInput.value = status.saved_server_url || status.server_url || "";
+  }
+  setText("metric-server", status.server_connected ? "已连接" : "未连接");
+  setText("metric-auth", status.authenticated ? "已认证" : "未认证");
+  setText("metric-ws", status.agent_ws_connected ? "已连接" : "未连接");
+  setText("metric-codex", status.codex_app_server_running ? "运行中" : "未启动");
+  setText("started-at", formatTime(status.started_at));
+  setText("state-root", status.state_root);
+  setText("ws-error", status.agent_ws_last_error || "-");
+  if (!configMessage.dataset.locked) {
+    const restartHint = status.server_url === status.saved_server_url
+      ? "当前运行配置与配置文件一致。"
+      : "配置变更需要重启 Gateway 后生效。";
+    setNotice(restartHint);
+  }
+}
+
+function renderPairings(devices) {
+  setText("pairing-count", String(devices.length));
+  const body = document.getElementById("pairings");
+  if (!devices.length) {
+    body.innerHTML = `<tr><td colspan="3" class="muted">暂无本地配对记录</td></tr>`;
+    return;
+  }
+  body.innerHTML = devices.map((device) => `
+    <tr>
+      <td class="mono">${escapeHTML(device.device_id)}</td>
+      <td class="mono">${escapeHTML(device.binding_id)}</td>
+      <td>${formatTime(device.paired_at)}</td>
+    </tr>
+  `).join("");
+}
+
+function escapeHTML(value) {
+  return String(value).replace(/[&<>"']/g, (char) => ({
+    "&": "&amp;",
+    "<": "&lt;",
+    ">": "&gt;",
+    "\"": "&quot;",
+    "'": "&#39;",
+  }[char]));
+}
+
+async function refresh(force = false) {
+  if (force) await fetchText("/api/pairing/refresh", { method: "POST" });
+  const [status, pairings] = await Promise.all([
+    fetchJSON("/api/status"),
+    fetchJSON("/api/pairings"),
+  ]);
+  renderStatus(status);
+  renderPairings(pairings);
+  document.getElementById("status").textContent = pretty(status);
+  try {
+    const payload = await fetchJSON("/api/pairing/payload");
+    document.getElementById("payload").textContent = pretty(payload);
+  } catch (error) {
+    document.getElementById("payload").textContent = error.message;
+  }
+  document.getElementById("qr").src = "/api/pairing/qr.svg?ts=" + Date.now();
+}
+
+async function withButton(button, task) {
+  button.disabled = true;
+  try {
+    await task();
+  } finally {
+    button.disabled = false;
+  }
+}
+
+serverInput.addEventListener("input", () => {
+  serverInput.dataset.dirty = "true";
+  configMessage.dataset.locked = "";
+});
+
+document.getElementById("refresh").addEventListener("click", (event) => {
+  withButton(event.currentTarget, () => refresh(true).catch((error) => setNotice(error.message, "bad")));
+});
+
+document.getElementById("test-server").addEventListener("click", (event) => {
+  withButton(event.currentTarget, async () => {
+    configMessage.dataset.locked = "true";
+    setNotice("正在测试连接...");
+    const result = await fetchJSON("/api/config/server-url/test", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ server_url: serverInput.value.trim() }),
+    });
+    setNotice(`${result.server_url} 可连接。`, "ok");
+  }).catch((error) => setNotice(error.message, "bad"));
+});
+
+document.getElementById("save-server").addEventListener("click", (event) => {
+  withButton(event.currentTarget, async () => {
+    configMessage.dataset.locked = "true";
+    const result = await fetchJSON("/api/config/server-url", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ server_url: serverInput.value.trim() }),
+    });
+    serverInput.dataset.dirty = "";
+    const override = result.saved_config_overridden_on_restart
+      ? " 当前启动参数会覆盖配置文件。"
+      : "";
+    setNotice(`已保存，重启 Gateway 后生效。${override}`, "ok");
+    await refresh(false);
+  }).catch((error) => setNotice(error.message, "bad"));
+});
+
+refresh(false);
+setInterval(() => refresh(false).catch((error) => setNotice(error.message, "bad")), 5000);

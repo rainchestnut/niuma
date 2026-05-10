@@ -58,6 +58,15 @@ pub fn binding_for_device(device_id: &str) -> Result<Option<PairedDeviceBinding>
     Ok(file.newest_for_device(device_id))
 }
 
+/// List locally known mobile bindings for dashboard diagnostics.
+pub fn list_bindings() -> Result<Vec<PairedDeviceBinding>> {
+    let path = bindings_path()?;
+    let file = read_bindings(&path)?;
+    let mut bindings = file.bindings.values().cloned().collect::<Vec<_>>();
+    bindings.sort_by(|left, right| right.paired_at.cmp(&left.paired_at));
+    Ok(bindings)
+}
+
 fn read_bindings(path: &PathBuf) -> Result<BindingFile> {
     if !path.exists() {
         return Ok(BindingFile::default());

@@ -7,24 +7,25 @@ use anyhow::{Context, Result};
 use axum::extract::State;
 use axum::http::{StatusCode, header};
 use axum::response::{Html, IntoResponse};
-use axum::routing::{get, post};
+use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use qrcode::QrCode;
 use qrcode::render::svg;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tokio::net::TcpListener;
 use tokio::sync::RwLock;
 use tokio::time::{Duration, sleep};
 use tracing::{error, info, warn};
 
+use crate::bindings::{self, PairedDeviceBinding};
 use crate::cli::GatewayArgs;
 use crate::codex::{self, CodexRuntime};
 use crate::codex_app_server::CodexAppServerClient;
-use crate::config::GatewayConfig;
+use crate::config::{self, ConfigValueSource, GatewayConfig};
 use crate::identity::AgentIdentity;
 use crate::pairing::{self, PairingMaterial, PairingPayload, PairingRuntimeState};
 use crate::paths;
-use crate::realtime;
+use crate::realtime::{self, AgentChannelStatus};
 use crate::server::{NiumaServerClient, is_unauthorized_response};
 
 #[derive(Clone)]
@@ -36,6 +37,7 @@ struct GatewayState {
     server: Option<NiumaServerClient>,
     session_token: Option<Arc<RwLock<String>>>,
     pairing: Arc<RwLock<PairingRuntimeState>>,
+    agent_channel: Arc<RwLock<AgentChannelStatus>>,
     started_at: i64,
 }
 
@@ -51,16 +53,45 @@ struct GatewayStatus {
     agent_id: String,
     device_name: String,
     state_root: String,
+    config_path: String,
     server_url: String,
+    server_url_source: ConfigValueSource,
+    saved_server_url: Option<String>,
     server_connected: bool,
     authenticated: bool,
+    agent_ws_connected: bool,
+    agent_ws_last_connected_at: Option<i64>,
+    agent_ws_last_error: Option<String>,
     pairing_payload_ready: bool,
     pair_token_expires_at: Option<i64>,
     codex_runtime: CodexRuntime,
+    codex_app_server_running: bool,
     dashboard_url: String,
     open_browser: bool,
     started_at: i64,
     last_pairing_error: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ServerUrlRequest {
+    server_url: String,
+}
+
+#[derive(Debug, Serialize)]
+struct ServerUrlUpdateResponse {
+    server_url: String,
+    active_server_url: String,
+    server_url_source: ConfigValueSource,
+    config_path: String,
+    restart_required: bool,
+    restart_required_reason: &'static str,
+    saved_config_overridden_on_restart: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct ServerUrlTestResponse {
+    server_url: String,
+    reachable: bool,
 }
 
 /// Run the local gateway HTTP service and pairing token maintenance loop.
@@ -116,6 +147,7 @@ pub async fn run(args: GatewayArgs) -> Result<()> {
         server,
         session_token,
         pairing: Arc::new(RwLock::new(initial_pairing)),
+        agent_channel: Arc::new(RwLock::new(AgentChannelStatus::default())),
         started_at: unix_timestamp(),
     };
 
@@ -128,17 +160,12 @@ pub async fn run(args: GatewayArgs) -> Result<()> {
             state.pairing.clone(),
             state.codex_app_server.clone(),
             state.server.clone(),
+            state.agent_channel.clone(),
         );
     }
 
     let dashboard_url = dashboard_url(&config);
-    let app = Router::new()
-        .route("/", get(index))
-        .route("/api/status", get(api_status))
-        .route("/api/pairing/payload", get(pairing_payload))
-        .route("/api/pairing/qr.svg", get(pairing_qr_svg))
-        .route("/api/pairing/refresh", post(refresh_pairing_payload))
-        .with_state(state);
+    let app = dashboard_router(state);
 
     let listener = TcpListener::bind((config.dashboard_host.as_str(), config.dashboard_port))
         .await
@@ -152,6 +179,21 @@ pub async fn run(args: GatewayArgs) -> Result<()> {
         .with_graceful_shutdown(shutdown_signal())
         .await?;
     Ok(())
+}
+
+fn dashboard_router(state: GatewayState) -> Router {
+    Router::new()
+        .route("/", get(index))
+        .route("/static/dashboard.css", get(dashboard_css))
+        .route("/static/dashboard.js", get(dashboard_js))
+        .route("/api/status", get(api_status))
+        .route("/api/config/server-url", put(update_server_url))
+        .route("/api/config/server-url/test", post(test_server_url))
+        .route("/api/pairings", get(paired_devices))
+        .route("/api/pairing/payload", get(pairing_payload))
+        .route("/api/pairing/qr.svg", get(pairing_qr_svg))
+        .route("/api/pairing/refresh", post(refresh_pairing_payload))
+        .with_state(state)
 }
 
 fn spawn_pairing_refresh(state: GatewayState) {
@@ -176,8 +218,75 @@ async fn index(State(state): State<GatewayState>) -> Html<String> {
     Html(render_index(&dashboard_url(&state.config)))
 }
 
+async fn dashboard_css() -> impl IntoResponse {
+    (
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "text/css; charset=utf-8")],
+        include_str!("../static/dashboard.css"),
+    )
+}
+
+async fn dashboard_js() -> impl IntoResponse {
+    (
+        StatusCode::OK,
+        [(
+            header::CONTENT_TYPE,
+            "application/javascript; charset=utf-8",
+        )],
+        include_str!("../static/dashboard.js"),
+    )
+}
+
 async fn api_status(State(state): State<GatewayState>) -> Json<GatewayStatus> {
     Json(build_status(&state).await)
+}
+
+async fn update_server_url(
+    State(state): State<GatewayState>,
+    Json(request): Json<ServerUrlRequest>,
+) -> Result<Json<ServerUrlUpdateResponse>, (StatusCode, Json<ApiError>)> {
+    let normalized = normalize_server_url(&request.server_url)
+        .map_err(|err| api_error(StatusCode::BAD_REQUEST, err.to_string()))?;
+    config::save_server_url(&normalized)
+        .map_err(|err| api_error(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()))?;
+    let config_path = paths::config_path()
+        .map(|path| path.display().to_string())
+        .unwrap_or_default();
+    let active_server_url = active_server_url(&state);
+    let source = state.config.server_url_source;
+    Ok(Json(ServerUrlUpdateResponse {
+        server_url: normalized,
+        active_server_url,
+        server_url_source: source,
+        config_path,
+        restart_required: true,
+        restart_required_reason: "server_url is read during gateway startup",
+        saved_config_overridden_on_restart: matches!(
+            source,
+            ConfigValueSource::Cli | ConfigValueSource::Env
+        ),
+    }))
+}
+
+async fn test_server_url(
+    Json(request): Json<ServerUrlRequest>,
+) -> Result<Json<ServerUrlTestResponse>, (StatusCode, Json<ApiError>)> {
+    let server = NiumaServerClient::new(request.server_url.trim())
+        .map_err(|err| api_error(StatusCode::BAD_REQUEST, err.to_string()))?;
+    server
+        .health()
+        .await
+        .map_err(|err| api_error(StatusCode::BAD_GATEWAY, err.to_string()))?;
+    Ok(Json(ServerUrlTestResponse {
+        server_url: server.base_url().to_string(),
+        reachable: true,
+    }))
+}
+
+async fn paired_devices() -> Result<Json<Vec<PairedDeviceBinding>>, (StatusCode, Json<ApiError>)> {
+    bindings::list_bindings()
+        .map(Json)
+        .map_err(|err| api_error(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()))
 }
 
 async fn pairing_payload(
@@ -198,6 +307,18 @@ async fn pairing_payload(
             }),
         )),
     }
+}
+
+fn normalize_server_url(server_url: &str) -> Result<String> {
+    let trimmed = server_url.trim();
+    if trimmed.is_empty() {
+        anyhow::bail!("server_url must not be empty");
+    }
+    Ok(NiumaServerClient::new(trimmed)?.base_url().to_string())
+}
+
+fn api_error(status: StatusCode, detail: String) -> (StatusCode, Json<ApiError>) {
+    (status, Json(ApiError { detail }))
 }
 
 async fn refresh_pairing_payload(
@@ -308,6 +429,8 @@ fn install_pairing_material(pairing_state: &mut PairingRuntimeState, material: P
 
 async fn build_status(state: &GatewayState) -> GatewayStatus {
     let pairing = state.pairing.read().await;
+    let agent_channel = state.agent_channel.read().await.clone();
+    let saved_config = config::read_config_file().ok().flatten();
     GatewayStatus {
         status: "ok",
         mode: if state.config.pairing_page_only {
@@ -320,16 +443,21 @@ async fn build_status(state: &GatewayState) -> GatewayStatus {
         state_root: paths::state_root()
             .map(|path| path.display().to_string())
             .unwrap_or_default(),
-        server_url: state
-            .server
-            .as_ref()
-            .map(|server| server.base_url().to_string())
-            .unwrap_or_else(|| state.config.server_url.clone()),
+        config_path: paths::config_path()
+            .map(|path| path.display().to_string())
+            .unwrap_or_default(),
+        server_url: active_server_url(state),
+        server_url_source: state.config.server_url_source,
+        saved_server_url: saved_config.and_then(|file| file.server_url),
         server_connected: state.server.is_some(),
         authenticated: state.session_token.is_some(),
+        agent_ws_connected: agent_channel.connected,
+        agent_ws_last_connected_at: agent_channel.last_connected_at,
+        agent_ws_last_error: agent_channel.last_error,
         pairing_payload_ready: pairing.payload.is_some(),
         pair_token_expires_at: pairing.payload.as_ref().map(|payload| payload.expires_at),
         codex_runtime: state.codex_runtime.clone(),
+        codex_app_server_running: state.codex_app_server.is_some(),
         dashboard_url: dashboard_url(&state.config),
         open_browser: state.config.open_browser,
         started_at: state.started_at,
@@ -337,63 +465,16 @@ async fn build_status(state: &GatewayState) -> GatewayStatus {
     }
 }
 
+fn active_server_url(state: &GatewayState) -> String {
+    state
+        .server
+        .as_ref()
+        .map(|server| server.base_url().to_string())
+        .unwrap_or_else(|| state.config.server_url.clone())
+}
+
 fn render_index(dashboard_url: &str) -> String {
-    format!(
-        r#"<!doctype html>
-<html lang="zh-CN">
-<head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Niuma Gateway</title>
-  <style>
-    :root {{ color-scheme: light dark; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }}
-    body {{ margin: 0; min-height: 100vh; display: grid; place-items: center; background: Canvas; color: CanvasText; }}
-    main {{ width: min(880px, calc(100vw - 32px)); display: grid; gap: 20px; grid-template-columns: minmax(260px, 360px) 1fr; align-items: start; }}
-    section {{ border: 1px solid color-mix(in srgb, CanvasText 14%, transparent); border-radius: 8px; padding: 20px; }}
-    h1 {{ margin: 0 0 8px; font-size: 24px; }}
-    h2 {{ margin: 0 0 12px; font-size: 16px; }}
-    img {{ width: 100%; aspect-ratio: 1; background: white; border-radius: 8px; }}
-    pre {{ overflow: auto; white-space: pre-wrap; word-break: break-word; font-size: 12px; }}
-    button {{ height: 36px; padding: 0 14px; border-radius: 6px; border: 0; background: CanvasText; color: Canvas; cursor: pointer; }}
-    .muted {{ opacity: .68; }}
-    @media (max-width: 720px) {{ main {{ grid-template-columns: 1fr; }} }}
-  </style>
-</head>
-<body>
-  <main>
-    <section>
-      <h1>Niuma Gateway</h1>
-      <p class="muted">{dashboard_url}</p>
-      <img id="qr" alt="Niuma pairing QR" src="/api/pairing/qr.svg" />
-      <p><button id="refresh">刷新二维码</button></p>
-    </section>
-    <section>
-      <h2>状态</h2>
-      <pre id="status">loading...</pre>
-      <h2>配对 Payload</h2>
-      <pre id="payload">loading...</pre>
-    </section>
-  </main>
-  <script>
-    async function readJSON(path) {{
-      const response = await fetch(path, {{ cache: "no-store" }});
-      const text = await response.text();
-      try {{ return JSON.stringify(JSON.parse(text), null, 2); }}
-      catch {{ return text; }}
-    }}
-    async function refresh(force = false) {{
-      if (force) await fetch("/api/pairing/refresh", {{ method: "POST" }});
-      document.getElementById("status").textContent = await readJSON("/api/status");
-      document.getElementById("payload").textContent = await readJSON("/api/pairing/payload");
-      document.getElementById("qr").src = "/api/pairing/qr.svg?ts=" + Date.now();
-    }}
-    document.getElementById("refresh").addEventListener("click", () => refresh(true));
-    refresh(false);
-    setInterval(() => refresh(false), 5000);
-  </script>
-</body>
-</html>"#
-    )
+    include_str!("../static/dashboard.html").replace("__DASHBOARD_URL__", dashboard_url)
 }
 
 fn dashboard_url(config: &GatewayConfig) -> String {
@@ -417,4 +498,230 @@ fn unix_timestamp() -> i64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs() as i64
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use std::ffi::OsString;
+    use std::path::PathBuf;
+    use std::sync::{Mutex, MutexGuard, OnceLock};
+
+    use axum::routing::get;
+    use serde_json::json;
+    use tokio::task::JoinHandle;
+    use uuid::Uuid;
+
+    static HOME_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+    #[tokio::test]
+    async fn update_server_url_endpoint_persists_config_and_requires_restart() {
+        let home = temp_home("server-url");
+        let _home = HomeOverride::new(&home);
+        let (dashboard_url, dashboard_task) = spawn_dashboard().await;
+
+        let response = reqwest::Client::new()
+            .put(format!("{dashboard_url}/api/config/server-url"))
+            .json(&json!({ "server_url": "https://example.invalid/niuma-server" }))
+            .send()
+            .await
+            .expect("dashboard request");
+
+        assert!(response.status().is_success());
+        let body: serde_json::Value = response.json().await.expect("json response");
+        assert_eq!(body["restart_required"], true);
+        assert_eq!(body["server_url"], "https://example.invalid/niuma-server/");
+
+        let config_text =
+            std::fs::read_to_string(home.join(".niuma/config.toml")).expect("saved config");
+        assert!(config_text.contains("server_url = \"https://example.invalid/niuma-server/\""));
+
+        dashboard_task.abort();
+        let _ = std::fs::remove_dir_all(home);
+    }
+
+    #[tokio::test]
+    async fn test_server_url_endpoint_calls_healthz() {
+        let home = temp_home("healthz");
+        let _home = HomeOverride::new(&home);
+        let health_listener = TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("health listener");
+        let health_addr = health_listener.local_addr().expect("health addr");
+        let health_task = tokio::spawn(async move {
+            let app = Router::new().route("/healthz", get(|| async { "ok" }));
+            axum::serve(health_listener, app)
+                .await
+                .expect("health server");
+        });
+        let (dashboard_url, dashboard_task) = spawn_dashboard().await;
+
+        let response = reqwest::Client::new()
+            .post(format!("{dashboard_url}/api/config/server-url/test"))
+            .json(&json!({ "server_url": format!("http://{health_addr}") }))
+            .send()
+            .await
+            .expect("dashboard request");
+
+        assert!(response.status().is_success());
+        let body: serde_json::Value = response.json().await.expect("json response");
+        assert_eq!(body["reachable"], true);
+        assert_eq!(body["server_url"], format!("http://{health_addr}/"));
+
+        dashboard_task.abort();
+        health_task.abort();
+        let _ = std::fs::remove_dir_all(home);
+    }
+
+    #[tokio::test]
+    async fn dashboard_serves_html_css_and_js_static_assets() {
+        let home = temp_home("static-assets");
+        let _home = HomeOverride::new(&home);
+        let (dashboard_url, dashboard_task) = spawn_dashboard().await;
+        let client = reqwest::Client::new();
+
+        let html = client
+            .get(&dashboard_url)
+            .send()
+            .await
+            .expect("html request")
+            .text()
+            .await
+            .expect("html response");
+        assert!(html.contains(r#"<link rel="stylesheet" href="/static/dashboard.css" />"#));
+        assert!(html.contains(r#"<script src="/static/dashboard.js"></script>"#));
+        assert!(!html.contains("const serverInput"));
+
+        let css = client
+            .get(format!("{dashboard_url}/static/dashboard.css"))
+            .send()
+            .await
+            .expect("css request");
+        assert_eq!(
+            css.headers()
+                .get(reqwest::header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok()),
+            Some("text/css; charset=utf-8")
+        );
+        assert!(css.text().await.expect("css response").contains(".qr"));
+
+        let js = client
+            .get(format!("{dashboard_url}/static/dashboard.js"))
+            .send()
+            .await
+            .expect("js request");
+        assert_eq!(
+            js.headers()
+                .get(reqwest::header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok()),
+            Some("application/javascript; charset=utf-8")
+        );
+        assert!(
+            js.text()
+                .await
+                .expect("js response")
+                .contains("const serverInput")
+        );
+
+        dashboard_task.abort();
+        let _ = std::fs::remove_dir_all(home);
+    }
+
+    async fn spawn_dashboard() -> (String, JoinHandle<()>) {
+        let listener = TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("dashboard listener");
+        let addr = listener.local_addr().expect("dashboard addr");
+        let task = tokio::spawn(async move {
+            axum::serve(listener, dashboard_router(test_state()))
+                .await
+                .expect("dashboard server");
+        });
+        (format!("http://{addr}"), task)
+    }
+
+    fn test_state() -> GatewayState {
+        GatewayState {
+            config: GatewayConfig {
+                server_url: "http://127.0.0.1:8000".to_string(),
+                server_url_source: ConfigValueSource::Default,
+                device_name: "Test Mac".to_string(),
+                dashboard_host: "127.0.0.1".to_string(),
+                dashboard_port: 8765,
+                heartbeat_seconds: 30,
+                pairing_page_only: true,
+                open_browser: false,
+                disable_codex_plugins: false,
+            },
+            identity: AgentIdentity {
+                agent_id: "agent_test".to_string(),
+                device_name: "Test Mac".to_string(),
+                os_type: "darwin".to_string(),
+                signing_private_key: "ed25519:private".to_string(),
+                signing_public_key: "ed25519:public".to_string(),
+                signing_key_fingerprint: "fingerprint-signing".to_string(),
+                encryption_private_key: "x25519:private".to_string(),
+                encryption_public_key: "x25519:public".to_string(),
+                encryption_key_fingerprint: "fingerprint-encryption".to_string(),
+            },
+            codex_runtime: CodexRuntime {
+                source: crate::codex::CodexRuntimeSource::PathCodex,
+                command: vec!["codex".to_string(), "app-server".to_string()],
+            },
+            codex_app_server: None,
+            server: None,
+            session_token: None,
+            pairing: Arc::new(RwLock::new(PairingRuntimeState {
+                payload: None,
+                last_error: Some("pairing payload is not ready".to_string()),
+                secrets: Default::default(),
+            })),
+            agent_channel: Arc::new(RwLock::new(AgentChannelStatus::default())),
+            started_at: 1_700_000_000,
+        }
+    }
+
+    fn temp_home(label: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("niuma-dashboard-{label}-{}", Uuid::new_v4()))
+    }
+
+    fn home_guard() -> MutexGuard<'static, ()> {
+        HOME_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    struct HomeOverride {
+        _guard: MutexGuard<'static, ()>,
+        old_home: Option<OsString>,
+    }
+
+    impl HomeOverride {
+        fn new(path: &PathBuf) -> Self {
+            let guard = home_guard();
+            let old_home = std::env::var_os("HOME");
+            // These dashboard interface tests need the production ~/.niuma path
+            // resolver while keeping writes inside a per-test temporary directory.
+            unsafe {
+                std::env::set_var("HOME", path);
+            }
+            Self {
+                _guard: guard,
+                old_home,
+            }
+        }
+    }
+
+    impl Drop for HomeOverride {
+        fn drop(&mut self) {
+            unsafe {
+                match &self.old_home {
+                    Some(value) => std::env::set_var("HOME", value),
+                    None => std::env::remove_var("HOME"),
+                }
+            }
+        }
+    }
 }
