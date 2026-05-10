@@ -109,6 +109,7 @@ nonisolated struct LiveThreadSyncMessage: Decodable {
     let title: String
     let status: ThreadStatus
     let lastCheckpointSeen: String?
+    let currentBranch: String?
     let updatedAt: TimeInterval?
     let agentID: String?
 
@@ -118,6 +119,7 @@ nonisolated struct LiveThreadSyncMessage: Decodable {
         case title
         case status
         case lastCheckpointSeen = "last_checkpoint_seen"
+        case currentBranch = "current_branch"
         case updatedAt = "updated_at"
         case agentID = "agent_id"
     }

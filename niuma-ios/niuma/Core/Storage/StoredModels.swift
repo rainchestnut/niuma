@@ -90,6 +90,7 @@ final class StoredThread {
     var title: String
     var statusRawValue: String
     var lastCheckpointSeen: String?
+    var currentBranch: String?
     var cursor: Int
     var checkpoint: String?
     var updatedAt: Date
@@ -101,6 +102,7 @@ final class StoredThread {
         self.title = thread.title
         self.statusRawValue = thread.status.rawValue
         self.lastCheckpointSeen = thread.lastCheckpointSeen
+        self.currentBranch = thread.currentBranch
         self.cursor = cursor
         self.checkpoint = checkpoint
         self.updatedAt = thread.updatedAt
@@ -113,6 +115,7 @@ final class StoredThread {
         title = thread.title
         statusRawValue = thread.status.rawValue
         lastCheckpointSeen = thread.lastCheckpointSeen
+        currentBranch = thread.currentBranch
         updatedAt = thread.updatedAt
     }
 
@@ -125,6 +128,7 @@ final class StoredThread {
             title: title,
             status: ThreadStatus(rawValue: statusRawValue) ?? .unknown,
             lastCheckpointSeen: lastCheckpointSeen ?? checkpoint,
+            currentBranch: currentBranch,
             updatedAt: updatedAt
         )
     }

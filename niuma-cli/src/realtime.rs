@@ -984,6 +984,7 @@ async fn metadata_record_from_payload(
     CodexThreadRecord {
         thread_id,
         project_id,
+        current_branch: cwd.as_deref().and_then(metadata::current_git_branch),
         cwd,
         title,
         status: status_override

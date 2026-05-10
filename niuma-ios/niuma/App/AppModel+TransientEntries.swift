@@ -29,6 +29,7 @@ extension AppModel {
                 title: prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? threadID : prompt,
                 status: .running,
                 lastCheckpointSeen: timeline.checkpoint,
+                currentBranch: threadSummary(for: threadID)?.currentBranch,
                 updatedAt: .now
             )
         )

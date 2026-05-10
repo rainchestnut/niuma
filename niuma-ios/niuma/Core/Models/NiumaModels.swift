@@ -429,6 +429,7 @@ nonisolated struct ThreadSummary: Codable, Identifiable, Hashable {
     let title: String
     let status: ThreadStatus
     let lastCheckpointSeen: String?
+    let currentBranch: String?
     let updatedAt: Date
 
     var id: String { threadID }

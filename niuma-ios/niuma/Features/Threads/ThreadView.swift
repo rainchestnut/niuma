@@ -28,7 +28,7 @@ struct ThreadView: View {
     @FocusState private var isPromptFocused: Bool
 
     private var thread: ThreadSummary {
-        session
+        appModel.threadSummary(for: session.threadID) ?? session
     }
 
     private var refreshStatus: ThreadRefreshStatus {
@@ -126,7 +126,7 @@ struct ThreadView: View {
                 matching: .any(of: [.images, .videos])
             )
             .sheet(isPresented: $isShowingBranchChanges) {
-                BranchChangesSheet(session: session)
+                BranchChangesSheet(session: thread)
             }
             .onChange(of: selectedPhotoItem) { _, newItem in
                 guard let newItem else { return }
@@ -214,7 +214,7 @@ struct ThreadView: View {
                 }
                 .buttonStyle(.plain)
 
-                Text(session.title)
+                Text(thread.title)
                     .font(.headline.weight(.semibold))
                     .foregroundStyle(NiumaPalette.ink)
                     .lineLimit(1)
@@ -270,7 +270,10 @@ struct ThreadView: View {
                 if let runtimeStateBadge = runtimeBadge {
                     StatusBadge(title: runtimeStateBadge.0, tone: runtimeStateBadge.1)
                 }
-                if let sessionBadge = session.status.compactBadge(for: appModel.appLanguage) {
+                if let currentBranch {
+                    BranchBadge(branch: currentBranch)
+                }
+                if let sessionBadge = thread.status.compactBadge(for: appModel.appLanguage) {
                     StatusBadge(title: sessionBadge.0, tone: sessionBadge.1)
                 }
                 if !pendingApprovals.isEmpty {
@@ -291,7 +294,7 @@ struct ThreadView: View {
     private var composer: some View {
         ThreadComposerBar(
             prompt: $prompt,
-            placeholder: L10n.string("thread.composer.placeholder", language: appModel.appLanguage, session.title),
+            placeholder: L10n.string("thread.composer.placeholder", language: appModel.appLanguage, thread.title),
             attachments: pendingAttachments,
             isSending: false,
             isPromptFocused: $isPromptFocused,
@@ -320,7 +323,7 @@ struct ThreadView: View {
         Task {
             await appModel.startTask(
                 projectID: project.projectID,
-                threadID: session.threadID,
+                threadID: thread.threadID,
                 prompt: text,
                 attachments: attachments
             )
@@ -369,7 +372,8 @@ struct ThreadView: View {
     /// Requests missing messages through the shared detail refresh flow.
     private func refreshDetails() async {
         guard !refreshStatus.isRefreshing else { return }
-        await appModel.refreshThreadDetails(threadID: session.threadID)
+        await appModel.refresh()
+        await appModel.refreshThreadDetails(threadID: thread.threadID)
     }
 
     /// Loads one older five-user-turn window from local SwiftData.
@@ -392,6 +396,14 @@ struct ThreadView: View {
         case .timedOut:
             return (refreshStatus.phase.title(for: appModel.appLanguage), .critical)
         }
+    }
+
+    private var currentBranch: String? {
+        guard let branch = thread.currentBranch?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !branch.isEmpty else {
+            return nil
+        }
+        return branch
     }
 
     private var refreshError: String? {
@@ -451,6 +463,31 @@ struct ThreadView: View {
                 proxy.scrollTo("thread-bottom", anchor: .bottom)
             }
         }
+    }
+}
+
+private struct BranchBadge: View {
+    let branch: String
+
+    var body: some View {
+        Label {
+            Text(branch)
+                .lineLimit(1)
+                .truncationMode(.middle)
+        } icon: {
+            Image(systemName: "arrow.triangle.branch")
+        }
+        .font(.caption2.weight(.semibold))
+        .padding(.horizontal, 9)
+        .padding(.vertical, 5)
+        .foregroundStyle(NiumaPalette.ink)
+        .background(NiumaPalette.neutralSoft, in: Capsule())
+        .overlay(
+            Capsule()
+                .stroke(NiumaPalette.ink.opacity(0.16), lineWidth: 1)
+        )
+        .frame(maxWidth: 180)
+        .accessibilityLabel(branch)
     }
 }
 

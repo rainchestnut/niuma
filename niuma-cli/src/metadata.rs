@@ -6,6 +6,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
@@ -33,6 +34,7 @@ pub struct ThreadSummary {
     pub title: String,
     pub status: String,
     pub last_checkpoint_seen: Option<String>,
+    pub current_branch: Option<String>,
     pub updated_at: Option<f64>,
 }
 
@@ -44,6 +46,7 @@ pub struct CodexThreadRecord {
     pub title: String,
     pub status: String,
     pub last_checkpoint_seen: Option<String>,
+    pub current_branch: Option<String>,
     pub updated_at: Option<f64>,
 }
 
@@ -170,6 +173,7 @@ impl CodexMetadataProjector {
                 title: thread.title.clone(),
                 status: thread.status.clone(),
                 last_checkpoint_seen: thread.last_checkpoint_seen.clone(),
+                current_branch: thread.current_branch.clone(),
                 updated_at: thread.updated_at,
             });
         }
@@ -204,6 +208,7 @@ impl CodexMetadataProjector {
         let Some(cwd) = project.cwd.as_deref() else {
             return Ok(Vec::new());
         };
+        let current_branch = current_git_branch(cwd);
         let mut threads_by_id = HashMap::new();
         for archived in [false, true] {
             for payload in self.app_server.list_thread_payloads(cwd, archived).await? {
@@ -211,6 +216,7 @@ impl CodexMetadataProjector {
                     &payload,
                     Some(&project.project_id),
                     Some(cwd),
+                    current_branch.clone(),
                     Some(archived),
                 )?;
                 threads_by_id.insert(thread.thread_id.clone(), thread);
@@ -227,7 +233,7 @@ impl CodexMetadataProjector {
                 .read_thread_payload(&thread_id, false)
                 .await
                 .with_context(|| format!("failed to read projectless thread {thread_id}"))?;
-            let thread = project_thread(&raw, Some(CONVERSATION_PROJECT_ID), None, None)?;
+            let thread = project_thread(&raw, Some(CONVERSATION_PROJECT_ID), None, None, None)?;
             match self.find_thread_in_cwd(&thread).await? {
                 Some(scoped) => threads.push(scoped),
                 None => threads.push(thread),
@@ -248,10 +254,16 @@ impl CodexMetadataProjector {
             .project_for_cwd(cwd)
             .map(|project| project.project_id)
             .unwrap_or_else(|| CONVERSATION_PROJECT_ID.to_string());
+        let current_branch = current_git_branch(cwd);
         for archived in [false, true] {
             for payload in self.app_server.list_thread_payloads(cwd, archived).await? {
-                let thread =
-                    project_thread(&payload, Some(&project_id), Some(cwd), Some(archived))?;
+                let thread = project_thread(
+                    &payload,
+                    Some(&project_id),
+                    Some(cwd),
+                    current_branch.clone(),
+                    Some(archived),
+                )?;
                 if thread.thread_id == target.thread_id {
                     return Ok(Some(thread));
                 }
@@ -280,6 +292,7 @@ pub fn snapshot_wire_messages(snapshot: &MetadataSnapshot) -> Vec<Value> {
             title: thread.title.clone(),
             status: thread.status.clone(),
             last_checkpoint_seen: thread.last_checkpoint_seen.clone(),
+            current_branch: thread.current_branch.clone(),
             updated_at: thread.updated_at,
         };
         messages.extend(thread_metadata_wire_messages(&record));
@@ -301,6 +314,7 @@ pub fn thread_metadata_wire_messages(thread: &CodexThreadRecord) -> Vec<Value> {
         "title": thread.title,
         "status": thread.status,
         "last_checkpoint_seen": thread.last_checkpoint_seen,
+        "current_branch": thread.current_branch,
         "updated_at": thread.updated_at,
     })]
 }
@@ -309,6 +323,7 @@ fn project_thread(
     payload: &Value,
     project_id: Option<&str>,
     cwd: Option<&str>,
+    current_branch: Option<String>,
     archived_override: Option<bool>,
 ) -> Result<CodexThreadRecord> {
     let thread_id = string_field(payload, "id").context("thread payload missing id")?;
@@ -320,6 +335,8 @@ fn project_thread(
         .or_else(|| string_field(payload, "preview"))
         .unwrap_or_else(|| thread_id.clone());
     let archived = archived_override.unwrap_or_else(|| bool_field(payload, "archived"));
+    let resolved_branch =
+        current_branch.or_else(|| resolved_cwd.as_deref().and_then(current_git_branch));
     Ok(CodexThreadRecord {
         thread_id,
         project_id: resolved_project_id,
@@ -327,8 +344,40 @@ fn project_thread(
         title,
         status: normalize_thread_status(payload.get("status"), archived),
         last_checkpoint_seen: None,
+        current_branch: resolved_branch,
         updated_at: number_field(payload, "updatedAt").or_else(|| Some(unix_timestamp())),
     })
+}
+
+/// Reads the current git branch for one Codex workspace root.
+///
+/// Detached HEADs are represented as `detached@<short-sha>` so the mobile UI can
+/// still show a useful workspace identity without treating it as a named branch.
+pub fn current_git_branch(cwd: &str) -> Option<String> {
+    let branch = git_stdout(cwd, &["symbolic-ref", "--short", "HEAD"]);
+    if branch.is_some() {
+        return branch;
+    }
+    git_stdout(cwd, &["rev-parse", "--short", "HEAD"]).map(|sha| format!("detached@{sha}"))
+}
+
+fn git_stdout(cwd: &str, args: &[&str]) -> Option<String> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(cwd)
+        .args(args)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8(output.stdout).ok()?;
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
 }
 
 fn empty_state() -> CodexGlobalState {
@@ -488,6 +537,7 @@ mod tests {
             title: "Archived".to_string(),
             status: "archived".to_string(),
             last_checkpoint_seen: None,
+            current_branch: Some("main".to_string()),
             updated_at: Some(1.0),
         });
 
@@ -495,5 +545,71 @@ mod tests {
         assert_eq!(messages[0]["kind"], "thread_sync");
         assert_eq!(messages[0]["thread_id"], "thread-1");
         assert_eq!(messages[0]["status"], "archived");
+        assert_eq!(messages[0]["current_branch"], "main");
+    }
+
+    #[test]
+    fn current_git_branch_reads_named_branch() {
+        let root = temp_git_root("named-branch");
+        run_git(&root, &["init"]);
+        run_git(
+            &root,
+            &["symbolic-ref", "HEAD", "refs/heads/feature/mobile-branch"],
+        );
+
+        assert_eq!(
+            current_git_branch(root.to_str().unwrap()).as_deref(),
+            Some("feature/mobile-branch")
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn current_git_branch_marks_detached_head() {
+        let root = temp_git_root("detached-head");
+        run_git(&root, &["init"]);
+        run_git(
+            &root,
+            &[
+                "-c",
+                "user.name=Niuma",
+                "-c",
+                "user.email=niuma@example.invalid",
+                "commit",
+                "--allow-empty",
+                "-m",
+                "initial",
+            ],
+        );
+        run_git(&root, &["checkout", "--detach", "HEAD"]);
+
+        let branch = current_git_branch(root.to_str().unwrap()).unwrap();
+        assert!(branch.starts_with("detached@"));
+        assert!(branch.len() > "detached@".len());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn current_git_branch_ignores_non_git_directory() {
+        let root = temp_git_root("non-git");
+        std::fs::create_dir_all(&root).unwrap();
+
+        assert_eq!(current_git_branch(root.to_str().unwrap()), None);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    fn temp_git_root(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("niuma-metadata-{name}-{}", uuid::Uuid::new_v4()))
+    }
+
+    fn run_git(root: &Path, args: &[&str]) {
+        std::fs::create_dir_all(root).unwrap();
+        let status = Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(args)
+            .status()
+            .unwrap();
+        assert!(status.success());
     }
 }

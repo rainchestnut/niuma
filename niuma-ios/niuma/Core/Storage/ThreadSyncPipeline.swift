@@ -255,6 +255,7 @@ private actor ThreadSyncPipelineWorker {
             title: threadID,
             status: .notLoaded,
             lastCheckpointSeen: nil,
+            currentBranch: nil,
             updatedAt: .now
         )
         let stored = StoredThread(thread: fallback)

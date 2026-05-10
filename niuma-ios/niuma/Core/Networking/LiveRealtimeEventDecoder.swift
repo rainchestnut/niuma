@@ -33,6 +33,7 @@ enum LiveRealtimeEventDecoder {
                     title: sync.title,
                     status: sync.status,
                     lastCheckpointSeen: sync.lastCheckpointSeen,
+                    currentBranch: sync.currentBranch,
                     updatedAt: sync.updatedAt.map(Date.init(timeIntervalSince1970:)) ?? .now
                 )
             )
