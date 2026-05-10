@@ -133,7 +133,6 @@ struct ProjectSessionsView: View {
 
 private struct SessionRow: View {
     @Environment(AppModel.self) private var appModel
-    @State private var isShowingActions = false
 
     let project: ProjectSummary
     let session: ThreadSummary
@@ -142,64 +141,49 @@ private struct SessionRow: View {
     let onArchive: () -> Void
 
     var body: some View {
-        ZStack(alignment: .topTrailing) {
-            HStack(alignment: .top, spacing: 10) {
-                NavigationLink {
-                    ThreadView(project: project, session: session)
-                } label: {
-                    SessionRowContent(session: session)
-                }
-                .buttonStyle(.plain)
-                .accessibilityIdentifier("project-session-row")
+        HStack(alignment: .top, spacing: 10) {
+            NavigationLink {
+                ThreadView(project: project, session: session)
+            } label: {
+                SessionRowContent(session: session)
+            }
+            .buttonStyle(.plain)
+            .accessibilityIdentifier("project-session-row")
 
+            Menu {
                 Button {
-                    withAnimation(.spring(response: 0.22, dampingFraction: 0.88)) {
-                        isShowingActions.toggle()
-                    }
+                    onResetHistory()
                 } label: {
-                    Group {
-                        if isArchiving {
-                            ProgressView()
-                                .tint(NiumaPalette.mutedInk)
-                        } else {
-                            Image(systemName: "ellipsis")
-                                .font(.system(size: 13, weight: .semibold))
-                        }
-                    }
-                    .foregroundStyle(isShowingActions ? NiumaPalette.ink : NiumaPalette.mutedInk)
-                    .frame(width: 30, height: 30)
-                    .background(
-                        Circle()
-                            .fill(isShowingActions ? NiumaPalette.card : NiumaPalette.neutralSoft)
+                    Label(
+                        L10n.string("session.reset.action", language: appModel.appLanguage),
+                        systemImage: "arrow.counterclockwise"
                     )
                 }
-                .buttonStyle(.plain)
-                .disabled(isArchiving)
-                .accessibilityLabel(L10n.string("session.actions.accessibility", language: appModel.appLanguage))
-            }
-
-            if isShowingActions {
-                SessionActionList(
-                    language: appModel.appLanguage,
-                    isArchiving: isArchiving,
-                    onResetHistory: {
-                        withAnimation(.spring(response: 0.18, dampingFraction: 0.9)) {
-                            isShowingActions = false
-                        }
-                        onResetHistory()
-                    },
-                    onArchive: {
-                        withAnimation(.spring(response: 0.18, dampingFraction: 0.9)) {
-                            isShowingActions = false
-                        }
-                        onArchive()
+                Button(role: .destructive) {
+                    onArchive()
+                } label: {
+                    Label(
+                        L10n.string("session.archive.action", language: appModel.appLanguage),
+                        systemImage: "archivebox"
+                    )
+                }
+            } label: {
+                Group {
+                    if isArchiving {
+                        ProgressView()
+                            .tint(NiumaPalette.mutedInk)
+                    } else {
+                        Image(systemName: "ellipsis")
+                            .font(.system(size: 13, weight: .semibold))
                     }
-                )
-                .frame(width: 168)
-                .offset(x: -38, y: 38)
-                .transition(.opacity.combined(with: .scale(scale: 0.98, anchor: .topTrailing)))
-                .zIndex(1)
+                }
+                .foregroundStyle(NiumaPalette.mutedInk)
+                .frame(width: 30, height: 30)
+                .background(Circle().fill(NiumaPalette.neutralSoft))
             }
+            .buttonStyle(.plain)
+            .disabled(isArchiving)
+            .accessibilityLabel(L10n.string("session.actions.accessibility", language: appModel.appLanguage))
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.horizontal, 16)
@@ -209,8 +193,6 @@ private struct SessionRow: View {
                 .fill(NiumaPalette.raisedCard)
         )
         .contentShape(Rectangle())
-        .padding(.bottom, isShowingActions ? 56 : 0)
-        .zIndex(isShowingActions ? 10 : 0)
     }
 }
 
@@ -255,99 +237,6 @@ private struct SessionRowContent: View {
             language: appModel.appLanguage,
             count
         )
-    }
-}
-
-private struct SessionActionList: View {
-    let language: AppLanguage
-    let isArchiving: Bool
-    let onResetHistory: () -> Void
-    let onArchive: () -> Void
-
-    var body: some View {
-        VStack(spacing: 4) {
-            SessionActionRow(
-                title: L10n.string("session.reset.action", language: language),
-                systemImage: "arrow.counterclockwise",
-                tone: .neutral,
-                action: onResetHistory
-            )
-            SessionActionRow(
-                title: L10n.string("session.archive.action", language: language),
-                systemImage: "archivebox",
-                tone: .destructive,
-                isDisabled: isArchiving,
-                action: onArchive
-            )
-        }
-        .padding(6)
-        .background(
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .fill(NiumaPalette.card)
-                .overlay(
-                    RoundedRectangle(cornerRadius: 14, style: .continuous)
-                        .stroke(NiumaPalette.neutralSoft, lineWidth: 1)
-                )
-        )
-        .shadow(color: .black.opacity(0.08), radius: 16, x: 0, y: 10)
-    }
-}
-
-private struct SessionActionRow: View {
-    let title: String
-    let systemImage: String
-    let tone: SessionActionTone
-    var isDisabled = false
-    let action: () -> Void
-
-    var body: some View {
-        Button(action: action) {
-            HStack(spacing: 9) {
-                Image(systemName: systemImage)
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(tone.foreground)
-                    .frame(width: 24, height: 24)
-                    .background(Circle().fill(tone.background))
-                Text(title)
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(tone.foreground)
-                Spacer()
-            }
-            .padding(.horizontal, 8)
-            .padding(.vertical, 8)
-            .frame(height: 40)
-            .background(
-                RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .fill(tone.background.opacity(0.38))
-            )
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .disabled(isDisabled)
-        .opacity(isDisabled ? 0.55 : 1)
-    }
-}
-
-private enum SessionActionTone {
-    case neutral
-    case destructive
-
-    var foreground: Color {
-        switch self {
-        case .neutral:
-            return NiumaPalette.ink
-        case .destructive:
-            return NiumaPalette.critical
-        }
-    }
-
-    var background: Color {
-        switch self {
-        case .neutral:
-            return NiumaPalette.neutralSoft
-        case .destructive:
-            return NiumaPalette.criticalSoft
-        }
     }
 }
 

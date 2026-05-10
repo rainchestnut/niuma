@@ -270,9 +270,6 @@ struct ThreadView: View {
                 if let runtimeStateBadge = runtimeBadge {
                     StatusBadge(title: runtimeStateBadge.0, tone: runtimeStateBadge.1)
                 }
-                if let currentBranch {
-                    BranchBadge(branch: currentBranch)
-                }
                 if let sessionBadge = thread.status.compactBadge(for: appModel.appLanguage) {
                     StatusBadge(title: sessionBadge.0, tone: sessionBadge.1)
                 }
@@ -292,23 +289,31 @@ struct ThreadView: View {
     }
 
     private var composer: some View {
-        ThreadComposerBar(
-            prompt: $prompt,
-            placeholder: L10n.string("thread.composer.placeholder", language: appModel.appLanguage, thread.title),
-            attachments: pendingAttachments,
-            isSending: false,
-            isPromptFocused: $isPromptFocused,
-            onPickPhotoOrVideo: {
-                isPickingPhotoMedia = true
-            },
-            onPickFile: {
-                isImportingFile = true
-            },
-            onRemoveAttachment: { attachment in
-                pendingAttachments.removeAll { $0.id == attachment.id }
-            },
-            onSend: sendPrompt
-        )
+        VStack(alignment: .leading, spacing: 0) {
+            if let currentBranch {
+                ThreadBranchChip(branch: currentBranch, language: appModel.appLanguage)
+                    .padding(.horizontal, 12)
+                    .padding(.top, 8)
+            }
+
+            ThreadComposerBar(
+                prompt: $prompt,
+                placeholder: L10n.string("thread.composer.placeholder", language: appModel.appLanguage, thread.title),
+                attachments: pendingAttachments,
+                isSending: false,
+                isPromptFocused: $isPromptFocused,
+                onPickPhotoOrVideo: {
+                    isPickingPhotoMedia = true
+                },
+                onPickFile: {
+                    isImportingFile = true
+                },
+                onRemoveAttachment: { attachment in
+                    pendingAttachments.removeAll { $0.id == attachment.id }
+                },
+                onSend: sendPrompt
+            )
+        }
     }
 
     /// Sends the current composer payload into this existing thread.
@@ -466,27 +471,39 @@ struct ThreadView: View {
     }
 }
 
-private struct BranchBadge: View {
+private struct ThreadBranchChip: View {
     let branch: String
+    let language: AppLanguage
+    @State private var isShowingFullBranch = false
 
     var body: some View {
-        Label {
-            Text(branch)
-                .lineLimit(1)
-                .truncationMode(.middle)
-        } icon: {
-            Image(systemName: "arrow.triangle.branch")
+        Button {
+            isShowingFullBranch = true
+        } label: {
+            HStack(spacing: 7) {
+                Image(systemName: "arrow.triangle.branch")
+                    .font(.caption2.weight(.semibold))
+                Text(branch)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Image(systemName: "info.circle")
+                    .font(.caption2.weight(.semibold))
+            }
+            .font(.caption2.weight(.semibold))
+            .padding(.horizontal, 9)
+            .padding(.vertical, 5)
+            .foregroundStyle(NiumaPalette.ink)
+            .background(NiumaPalette.neutralSoft, in: Capsule())
+            .overlay(
+                Capsule()
+                    .stroke(NiumaPalette.ink.opacity(0.16), lineWidth: 1)
+            )
+            .frame(maxWidth: 220, alignment: .leading)
         }
-        .font(.caption2.weight(.semibold))
-        .padding(.horizontal, 9)
-        .padding(.vertical, 5)
-        .foregroundStyle(NiumaPalette.ink)
-        .background(NiumaPalette.neutralSoft, in: Capsule())
-        .overlay(
-            Capsule()
-                .stroke(NiumaPalette.ink.opacity(0.16), lineWidth: 1)
-        )
-        .frame(maxWidth: 180)
+        .buttonStyle(.plain)
+        .alert(branch, isPresented: $isShowingFullBranch) {
+            Button(L10n.string("common.ok", language: language), role: .cancel) {}
+        }
         .accessibilityLabel(branch)
     }
 }
