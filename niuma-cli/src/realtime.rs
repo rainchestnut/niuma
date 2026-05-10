@@ -28,6 +28,13 @@ use crate::transfers::{self, TransferContext, TransferReady, TransferStore};
 
 const CONVERSATION_PROJECT_ID: &str = "__conversation__";
 
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct AgentChannelStatus {
+    pub connected: bool,
+    pub last_connected_at: Option<i64>,
+    pub last_error: Option<String>,
+}
+
 #[derive(Debug, Deserialize)]
 struct PairHandshakeMessage {
     request_id: String,
@@ -141,8 +148,13 @@ pub fn spawn_agent_channel(
     pairing: Arc<RwLock<PairingRuntimeState>>,
     codex_app_server: Option<CodexAppServerClient>,
     server: Option<NiumaServerClient>,
+    channel_status: Arc<RwLock<AgentChannelStatus>>,
 ) {
     let Some(session_token) = session_token else {
+        tokio::spawn(async move {
+            channel_status.write().await.last_error =
+                Some("gateway is not authenticated".to_string());
+        });
         return;
     };
     let transfer_context = server.and_then(|server| {
@@ -162,7 +174,7 @@ pub fn spawn_agent_channel(
     tokio::spawn(async move {
         loop {
             let current_session_token = session_token.read().await.clone();
-            if let Err(err) = run_agent_channel(
+            let result = run_agent_channel(
                 &identity,
                 &config,
                 &current_session_token,
@@ -172,9 +184,18 @@ pub fn spawn_agent_channel(
                 transfer_context.clone(),
                 pending_approvals.clone(),
                 pending_user_inputs.clone(),
+                channel_status.clone(),
             )
-            .await
+            .await;
             {
+                let mut status = channel_status.write().await;
+                status.connected = false;
+                status.last_error = Some(match &result {
+                    Ok(()) => "agent websocket closed".to_string(),
+                    Err(err) => err.to_string(),
+                });
+            }
+            if let Err(err) = result {
                 warn!("agent websocket disconnected: {err:#}");
             }
             sleep(Duration::from_secs(2)).await;
@@ -192,12 +213,19 @@ async fn run_agent_channel(
     transfer_context: Option<TransferContext>,
     pending_approvals: Arc<RwLock<HashMap<String, PendingApproval>>>,
     pending_user_inputs: Arc<RwLock<HashMap<String, PendingUserInput>>>,
+    channel_status: Arc<RwLock<AgentChannelStatus>>,
 ) -> Result<()> {
     let url = agent_ws_url(&config.server_url, &identity.agent_id, session_token)?;
     let (socket, _) = connect_async(url.as_str())
         .await
         .with_context(|| format!("failed to connect agent websocket {url}"))?;
     info!("agent websocket connected");
+    {
+        let mut status = channel_status.write().await;
+        status.connected = true;
+        status.last_connected_at = Some(unix_timestamp());
+        status.last_error = None;
+    }
     let (mut writer, mut reader) = socket.split();
     let mut notifications = codex_app_server
         .as_ref()
