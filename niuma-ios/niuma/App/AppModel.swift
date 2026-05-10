@@ -123,7 +123,6 @@ final class AppModel {
             .flatMap { $0 }
             .filter { $0.status != .archived }
             .filter { $0.projectID == conversationProjectID }
-            .sorted(by: { $0.updatedAt > $1.updatedAt })
             .map(\.self)
     }
 

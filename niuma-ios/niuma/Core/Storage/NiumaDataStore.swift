@@ -146,7 +146,6 @@ final class NiumaDataStore {
     func loadProjects() -> [ProjectSummary] {
         fetchAll(StoredProject.self)
             .map { $0.toDomain() }
-            .sorted(by: { $0.updatedAt > $1.updatedAt })
     }
 
     /// Inserts or updates one project summary row.
@@ -161,10 +160,9 @@ final class NiumaDataStore {
         }
     }
 
-    /// Loads threads grouped by project and sorted for list display.
+    /// Loads threads grouped by project using the store's default fetch order.
     func loadThreadsByProject() -> [String: [ThreadSummary]] {
         Dictionary(grouping: loadThreads(), by: \.projectID)
-            .mapValues { $0.sorted(by: { $0.updatedAt > $1.updatedAt }) }
     }
 
     /// Clears cached message history for a thread while preserving its list row.

@@ -21,18 +21,6 @@ extension AppModel {
             contentParts: contentParts.isEmpty ? nil : contentParts
         )
         transientOutgoingEntries[threadID, default: []].append(entry)
-        upsertThreadSummary(
-            ThreadSummary(
-                threadID: threadID,
-                projectID: projectID,
-                agentID: agentID,
-                title: prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? threadID : prompt,
-                status: .running,
-                lastCheckpointSeen: timeline.checkpoint,
-                currentBranch: threadSummary(for: threadID)?.currentBranch,
-                updatedAt: .now
-            )
-        )
         return (threadID, entryID)
     }
 

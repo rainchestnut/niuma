@@ -8,7 +8,6 @@ extension AppModel {
         } else {
             threads.insert(thread, at: 0)
         }
-        threads.sort(by: { $0.updatedAt > $1.updatedAt })
         threadsByProject[thread.projectID] = threads
     }
 
