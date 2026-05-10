@@ -21,6 +21,7 @@ REMOTE_DIR="${NIUMA_DEPLOY_REMOTE_DIR:-/data/services/niuma-server}"
 SERVICE_NAME="${NIUMA_DEPLOY_SERVICE_NAME:-niuma-server}"
 SERVICE_FILE="${NIUMA_DEPLOY_SERVICE_FILE:-deploy/niuma-server.service}"
 REMOTE_SERVICE_FILE="${NIUMA_DEPLOY_REMOTE_SERVICE_FILE:-/etc/systemd/system/$SERVICE_NAME.service}"
+REMOTE_ENV_FILE="${NIUMA_DEPLOY_REMOTE_ENV_FILE:-$REMOTE_DIR/.env}"
 TARGET_TRIPLE="${NIUMA_DEPLOY_TARGET_TRIPLE:-x86_64-unknown-linux-gnu}"
 TARGET_GLIBC="${NIUMA_DEPLOY_TARGET_GLIBC:-2.34}"
 ZIGBUILD_TARGET="$TARGET_TRIPLE.$TARGET_GLIBC"
@@ -51,8 +52,6 @@ if ! rustup target list --installed | grep -qx "$TARGET_TRIPLE"; then
   fail "Rust target $TARGET_TRIPLE is not installed; run 'rustup target add $TARGET_TRIPLE'"
 fi
 
-[ -f .env ] || fail "Missing local .env; deployment requires the server to use the same niuma-server configuration"
-
 log "Cross-compiling $SERVICE_NAME for $ZIGBUILD_TARGET ..."
 cargo zigbuild --release --target "$ZIGBUILD_TARGET"
 [ -x "$LOCAL_BINARY" ] || fail "Missing cross-compiled binary at $LOCAL_BINARY"
@@ -66,8 +65,13 @@ scp "$LOCAL_BINARY" "$SERVER:$REMOTE_BINARY_TMP"
 log "Uploading systemd unit..."
 scp "$SERVICE_FILE" "$SERVER:$REMOTE_SERVICE_TMP"
 
-log "Uploading .env to $REMOTE_DIR/.env ..."
-scp .env "$SERVER:$REMOTE_DIR/.env"
+if ssh "$SERVER" "test -f '$REMOTE_ENV_FILE'"; then
+  log "Remote env exists at $REMOTE_ENV_FILE; keeping existing server configuration."
+else
+  [ -f .env ] || fail "Remote env is missing and local .env was not found; create one before first deploy"
+  log "Remote env missing; uploading local .env to $REMOTE_ENV_FILE ..."
+  scp .env "$SERVER:$REMOTE_ENV_FILE"
+fi
 
 log "Installing binary and systemd service..."
 ssh "$SERVER" "install -m 755 '$REMOTE_BINARY_TMP' '$REMOTE_DIR/$SERVICE_NAME' && install -m 644 '$REMOTE_SERVICE_TMP' '$REMOTE_SERVICE_FILE' && rm '$REMOTE_BINARY_TMP' '$REMOTE_SERVICE_TMP' && systemctl daemon-reload && systemctl enable '$SERVICE_NAME' && systemctl restart '$SERVICE_NAME'"
