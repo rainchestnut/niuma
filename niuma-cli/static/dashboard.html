@@ -65,19 +65,19 @@
       <section class="panel">
         <div class="panel-head">
           <div>
-            <h2>文件权限预检查</h2>
-            <p>启动时对这些目录做真实访问探测，任务执行时只读取已通过预检查的目录。</p>
+            <h2>文件权限预申请</h2>
+            <p>启动或保存时申请这些目录的访问权限，任务执行时只读取已授权目录。</p>
           </div>
           <span id="file-access-state" class="pill">loading</span>
         </div>
         <label>
-          预检查目录
+          权限申请目录
           <input id="file-access-roots" spellcheck="false" autocomplete="off" />
         </label>
         <div class="timeout-grid">
           <label>
-            预检查超时（秒）
-            <input id="file-access-precheck-timeout" type="number" min="1" max="120" />
+            权限申请超时（秒）
+            <input id="file-access-permission-timeout" type="number" min="1" max="120" />
           </label>
           <label>
             读取超时（秒）
@@ -85,8 +85,8 @@
           </label>
         </div>
         <div class="actions">
-          <button id="rerun-file-access">重新预检查</button>
-          <button id="save-file-access" class="primary">保存并预检查</button>
+          <button id="rerun-file-access">重新申请权限</button>
+          <button id="save-file-access" class="primary">保存并申请权限</button>
         </div>
         <div id="file-access-message" class="notice">-</div>
         <div id="file-access-roots-list" class="file-access-list">

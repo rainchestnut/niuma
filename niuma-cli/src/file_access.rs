@@ -1,9 +1,9 @@
-//! Local file access policy and timeout-bounded TCC probes.
+//! Local file access policy and timeout-bounded TCC permission requests.
 //!
 //! Niuma sometimes needs to mirror desktop-local images into mobile transfers.
-//! This module keeps that behavior explicit: startup probes configured
-//! directories to trigger macOS TCC while the user is present, and task-time
-//! reads only run for paths covered by a successful precheck.
+//! This module keeps that behavior explicit: startup requests access to configured
+//! directories through real filesystem reads while the user is present, and task-time
+//! reads only run for paths covered by a successful permission request.
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -18,9 +18,9 @@ use tracing::info;
 
 use crate::cli::{FileAccessHelperArgs, FileAccessHelperCommands};
 
-const DEFAULT_PRECHECK_TIMEOUT_SECONDS: u64 = 60;
+const DEFAULT_PERMISSION_TIMEOUT_SECONDS: u64 = 60;
 const DEFAULT_READ_TIMEOUT_SECONDS: u64 = 10;
-const MAX_PRECHECK_TIMEOUT_SECONDS: u64 = 120;
+const MAX_PERMISSION_TIMEOUT_SECONDS: u64 = 120;
 const MAX_READ_TIMEOUT_SECONDS: u64 = 15;
 const HELPER_EXIT_PERMISSION_DENIED: i32 = 77;
 const HELPER_EXIT_MISSING: i32 = 66;
@@ -29,25 +29,29 @@ const HELPER_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct FileAccessConfigFile {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub precheck_roots: Option<Vec<String>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub precheck_timeout_seconds: Option<u64>,
+    #[serde(rename = "permission_roots", skip_serializing_if = "Option::is_none")]
+    pub permission_roots: Option<Vec<String>>,
+    #[serde(
+        rename = "permission_timeout_seconds",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub permission_timeout_seconds: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub read_timeout_seconds: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FileAccessConfig {
-    pub precheck_roots: Vec<String>,
-    pub precheck_timeout_seconds: u64,
+    pub permission_roots: Vec<String>,
+    pub permission_timeout_seconds: u64,
     pub read_timeout_seconds: u64,
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub struct FileAccessSnapshot {
     pub roots_text: String,
-    pub precheck_timeout_seconds: u64,
+    #[serde(rename = "permission_timeout_seconds")]
+    pub permission_timeout_seconds: u64,
     pub read_timeout_seconds: u64,
     pub running: bool,
     pub updated_at: Option<i64>,
@@ -60,13 +64,16 @@ pub struct FileAccessRootSnapshot {
     pub normalized_root: Option<String>,
     pub status: FileAccessStatus,
     pub message: Option<String>,
+    #[serde(rename = "requested_at")]
     pub checked_at: Option<i64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FileAccessStatus {
+    #[serde(rename = "not_requested")]
     NotChecked,
+    #[serde(rename = "requesting")]
     Checking,
     Granted,
     Denied,
@@ -99,7 +106,7 @@ struct RuntimeState {
     roots: Vec<FileAccessRoot>,
     running: bool,
     updated_at: Option<i64>,
-    // Invalidates older async precheck tasks when the user changes config or reruns checks.
+    // Invalidates older async permission-request tasks when the user changes config or reruns.
     generation: u64,
 }
 
@@ -108,8 +115,8 @@ static RUNTIME: OnceLock<Arc<RwLock<RuntimeState>>> = OnceLock::new();
 impl Default for FileAccessConfig {
     fn default() -> Self {
         Self {
-            precheck_roots: vec!["~/Downloads".to_string(), "~/Documents".to_string()],
-            precheck_timeout_seconds: DEFAULT_PRECHECK_TIMEOUT_SECONDS,
+            permission_roots: vec!["~/Downloads".to_string(), "~/Documents".to_string()],
+            permission_timeout_seconds: DEFAULT_PERMISSION_TIMEOUT_SECONDS,
             read_timeout_seconds: DEFAULT_READ_TIMEOUT_SECONDS,
         }
     }
@@ -122,15 +129,15 @@ impl FileAccessConfig {
             return defaults;
         };
         Self {
-            precheck_roots: file
-                .precheck_roots
+            permission_roots: file
+                .permission_roots
                 .clone()
-                .unwrap_or(defaults.precheck_roots),
-            precheck_timeout_seconds: clamp_timeout(
-                file.precheck_timeout_seconds
-                    .unwrap_or(defaults.precheck_timeout_seconds),
+                .unwrap_or(defaults.permission_roots),
+            permission_timeout_seconds: clamp_timeout(
+                file.permission_timeout_seconds
+                    .unwrap_or(defaults.permission_timeout_seconds),
                 1,
-                MAX_PRECHECK_TIMEOUT_SECONDS,
+                MAX_PERMISSION_TIMEOUT_SECONDS,
             ),
             read_timeout_seconds: clamp_timeout(
                 file.read_timeout_seconds
@@ -143,30 +150,30 @@ impl FileAccessConfig {
 
     pub fn into_config_file(self) -> FileAccessConfigFile {
         FileAccessConfigFile {
-            precheck_roots: Some(self.precheck_roots),
-            precheck_timeout_seconds: Some(self.precheck_timeout_seconds),
+            permission_roots: Some(self.permission_roots),
+            permission_timeout_seconds: Some(self.permission_timeout_seconds),
             read_timeout_seconds: Some(self.read_timeout_seconds),
         }
     }
 
     pub fn from_dashboard(
         roots_text: &str,
-        precheck_timeout_seconds: u64,
+        permission_timeout_seconds: u64,
         read_timeout_seconds: u64,
     ) -> Self {
         Self {
-            precheck_roots: parse_roots_text(roots_text),
-            precheck_timeout_seconds: clamp_timeout(
-                precheck_timeout_seconds,
+            permission_roots: parse_roots_text(roots_text),
+            permission_timeout_seconds: clamp_timeout(
+                permission_timeout_seconds,
                 1,
-                MAX_PRECHECK_TIMEOUT_SECONDS,
+                MAX_PERMISSION_TIMEOUT_SECONDS,
             ),
             read_timeout_seconds: clamp_timeout(read_timeout_seconds, 1, MAX_READ_TIMEOUT_SECONDS),
         }
     }
 
     fn roots_text(&self) -> String {
-        self.precheck_roots.join(";")
+        self.permission_roots.join(";")
     }
 }
 
@@ -180,8 +187,8 @@ pub fn parse_roots_text(value: &str) -> Vec<String> {
 }
 
 pub fn configure(config: FileAccessConfig) {
-    let roots = build_roots(&config, FileAccessStatus::NotChecked);
     let mut runtime = runtime().write().expect("file access runtime poisoned");
+    let roots = build_roots(&config, FileAccessStatus::NotChecked);
     let generation = runtime.generation.wrapping_add(1);
     *runtime = RuntimeState {
         config,
@@ -192,7 +199,7 @@ pub fn configure(config: FileAccessConfig) {
     };
 }
 
-pub fn spawn_precheck() {
+pub fn request_permissions() {
     let (config, generation) = {
         let mut runtime = runtime().write().expect("file access runtime poisoned");
         runtime.generation = runtime.generation.wrapping_add(1);
@@ -203,10 +210,10 @@ pub fn spawn_precheck() {
     };
 
     tokio::spawn(async move {
-        let timeout = Duration::from_secs(config.precheck_timeout_seconds);
+        let timeout = Duration::from_secs(config.permission_timeout_seconds);
         let mut checked = Vec::new();
         for mut root in build_roots(&config, FileAccessStatus::Checking) {
-            let result = precheck_root(&root, timeout).await;
+            let result = request_root_permission(&root, timeout).await;
             root.status = result.status;
             root.message = result.message;
             root.checked_at = Some(unix_timestamp());
@@ -219,7 +226,7 @@ pub fn spawn_precheck() {
         runtime.roots = checked;
         runtime.running = false;
         runtime.updated_at = Some(unix_timestamp());
-        info!("file access precheck finished");
+        info!("file access permission request finished");
     });
 }
 
@@ -227,7 +234,7 @@ pub fn snapshot() -> FileAccessSnapshot {
     let runtime = runtime().read().expect("file access runtime poisoned");
     FileAccessSnapshot {
         roots_text: runtime.config.roots_text(),
-        precheck_timeout_seconds: runtime.config.precheck_timeout_seconds,
+        permission_timeout_seconds: runtime.config.permission_timeout_seconds,
         read_timeout_seconds: runtime.config.read_timeout_seconds,
         running: runtime.running,
         updated_at: runtime.updated_at,
@@ -258,7 +265,7 @@ pub fn read_file_for_transfer(path: &Path) -> FileReadOutcome {
     else {
         return FileReadOutcome::PathOnly {
             path: path_text,
-            reason: "路径不在启动预检查目录中".to_string(),
+            reason: "路径不在启动权限申请目录中".to_string(),
         };
     };
     if root.status != FileAccessStatus::Granted {
@@ -294,8 +301,8 @@ pub fn read_file_for_transfer(path: &Path) -> FileReadOutcome {
 
 pub fn run_helper(args: FileAccessHelperArgs) -> Result<()> {
     match args.command {
-        FileAccessHelperCommands::Precheck { path } => {
-            helper_precheck_path(&path);
+        FileAccessHelperCommands::Request { path } => {
+            helper_request_path(&path);
         }
         FileAccessHelperCommands::Copy { path, output } => {
             helper_copy_file(&path, &output);
@@ -306,8 +313,8 @@ pub fn run_helper(args: FileAccessHelperArgs) -> Result<()> {
 #[cfg(test)]
 pub fn configure_test_roots(roots: Vec<String>, status: FileAccessStatus) {
     let config = FileAccessConfig {
-        precheck_roots: roots,
-        precheck_timeout_seconds: DEFAULT_PRECHECK_TIMEOUT_SECONDS,
+        permission_roots: roots,
+        permission_timeout_seconds: DEFAULT_PERMISSION_TIMEOUT_SECONDS,
         read_timeout_seconds: DEFAULT_READ_TIMEOUT_SECONDS,
     };
     let roots = build_roots(&config, status);
@@ -337,7 +344,7 @@ fn runtime() -> &'static Arc<RwLock<RuntimeState>> {
 
 fn build_roots(config: &FileAccessConfig, status: FileAccessStatus) -> Vec<FileAccessRoot> {
     config
-        .precheck_roots
+        .permission_roots
         .iter()
         .map(|input| build_root(input, status))
         .collect()
@@ -350,6 +357,22 @@ fn build_root(input: &str, status: FileAccessStatus) -> FileAccessRoot {
         return FileAccessRoot {
             input: trimmed.to_string(),
             normalized_root: Some(PathBuf::from("/")),
+            wildcard: true,
+            probe_paths,
+            status,
+            message: None,
+            checked_at: None,
+        };
+    }
+    if let Some(prefix) = trimmed.strip_suffix("/*") {
+        let normalized = expand_home(prefix).map(PathBuf::from);
+        let probe_paths = normalized
+            .as_ref()
+            .map(|path| wildcard_probe_paths(path))
+            .unwrap_or_default();
+        return FileAccessRoot {
+            input: trimmed.to_string(),
+            normalized_root: normalized,
             wildcard: true,
             probe_paths,
             status,
@@ -371,46 +394,49 @@ fn build_root(input: &str, status: FileAccessStatus) -> FileAccessRoot {
     }
 }
 
-struct PrecheckResult {
+struct PermissionRequestResult {
     status: FileAccessStatus,
     message: Option<String>,
 }
 
-async fn precheck_root(root: &FileAccessRoot, timeout: Duration) -> PrecheckResult {
+async fn request_root_permission(
+    root: &FileAccessRoot,
+    timeout: Duration,
+) -> PermissionRequestResult {
     if root.normalized_root.is_none() {
-        return PrecheckResult {
+        return PermissionRequestResult {
             status: FileAccessStatus::Invalid,
-            message: Some("目录必须是绝对路径、~ 开头路径或 /*".to_string()),
+            message: Some("目录必须是绝对路径、~ 开头路径、/* 或 ~/*".to_string()),
         };
     }
     if root.probe_paths.is_empty() {
-        return PrecheckResult {
+        return PermissionRequestResult {
             status: FileAccessStatus::Missing,
-            message: Some("没有可检查的目录".to_string()),
+            message: Some("没有可申请权限的目录".to_string()),
         };
     }
 
     let mut last_missing = None;
     for path in &root.probe_paths {
-        match helper_precheck_with_timeout(path, timeout).await {
+        match helper_request_with_timeout(path, timeout).await {
             Ok(()) => {}
-            Err(PrecheckFailure::Denied(message)) => {
-                return PrecheckResult {
+            Err(PermissionRequestFailure::Denied(message)) => {
+                return PermissionRequestResult {
                     status: FileAccessStatus::Denied,
                     message: Some(message),
                 };
             }
-            Err(PrecheckFailure::Timeout) => {
-                return PrecheckResult {
+            Err(PermissionRequestFailure::Timeout) => {
+                return PermissionRequestResult {
                     status: FileAccessStatus::Timeout,
                     message: Some(format!("权限请求超过 {} 秒未完成", timeout.as_secs())),
                 };
             }
-            Err(PrecheckFailure::Missing(message)) => {
+            Err(PermissionRequestFailure::Missing(message)) => {
                 last_missing = Some(message);
             }
-            Err(PrecheckFailure::Error(message)) => {
-                return PrecheckResult {
+            Err(PermissionRequestFailure::Error(message)) => {
+                return PermissionRequestResult {
                     status: FileAccessStatus::Error,
                     message: Some(message),
                 };
@@ -419,55 +445,55 @@ async fn precheck_root(root: &FileAccessRoot, timeout: Duration) -> PrecheckResu
     }
 
     if let Some(message) = last_missing {
-        PrecheckResult {
+        PermissionRequestResult {
             status: FileAccessStatus::Missing,
             message: Some(message),
         }
     } else {
-        PrecheckResult {
+        PermissionRequestResult {
             status: FileAccessStatus::Granted,
             message: None,
         }
     }
 }
 
-enum PrecheckFailure {
+enum PermissionRequestFailure {
     Denied(String),
     Timeout,
     Missing(String),
     Error(String),
 }
 
-async fn helper_precheck_with_timeout(
+async fn helper_request_with_timeout(
     path: &Path,
     timeout: Duration,
-) -> Result<(), PrecheckFailure> {
-    let mut child = TokioCommand::new(current_exe().map_err(PrecheckFailure::Error)?)
+) -> Result<(), PermissionRequestFailure> {
+    let mut child = TokioCommand::new(current_exe().map_err(PermissionRequestFailure::Error)?)
         .arg("file-access-helper")
-        .arg("precheck")
+        .arg("request")
         .arg("--path")
         .arg(path)
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
-        .map_err(|error| PrecheckFailure::Error(error.to_string()))?;
+        .map_err(|error| PermissionRequestFailure::Error(error.to_string()))?;
 
     match time::timeout(timeout, child.wait()).await {
         Ok(Ok(status)) if status.success() => Ok(()),
         Ok(Ok(status)) if status.code() == Some(HELPER_EXIT_PERMISSION_DENIED) => Err(
-            PrecheckFailure::Denied(format!("没有访问 {} 的权限", path.display())),
+            PermissionRequestFailure::Denied(format!("没有访问 {} 的权限", path.display())),
         ),
         Ok(Ok(status)) if status.code() == Some(HELPER_EXIT_MISSING) => Err(
-            PrecheckFailure::Missing(format!("{} 不存在或不是目录", path.display())),
+            PermissionRequestFailure::Missing(format!("{} 不存在或不是目录", path.display())),
         ),
-        Ok(Ok(status)) => Err(PrecheckFailure::Error(format!(
-            "权限检查失败，退出码 {:?}",
+        Ok(Ok(status)) => Err(PermissionRequestFailure::Error(format!(
+            "权限申请失败，退出码 {:?}",
             status.code()
         ))),
-        Ok(Err(error)) => Err(PrecheckFailure::Error(error.to_string())),
+        Ok(Err(error)) => Err(PermissionRequestFailure::Error(error.to_string())),
         Err(_) => {
             let _ = child.kill().await;
-            Err(PrecheckFailure::Timeout)
+            Err(PermissionRequestFailure::Timeout)
         }
     }
 }
@@ -522,7 +548,7 @@ fn helper_copy_with_timeout(path: &Path, timeout: Duration) -> Result<Vec<u8>, S
     Ok(bytes)
 }
 
-fn helper_precheck_path(path: &Path) -> ! {
+fn helper_request_path(path: &Path) -> ! {
     if !path.exists() || !path.is_dir() {
         std::process::exit(HELPER_EXIT_MISSING);
     }
@@ -564,7 +590,11 @@ fn helper_copy_file(path: &Path, output: &Path) -> ! {
 
 fn root_matches_path(root: &FileAccessRoot, path: &Path) -> bool {
     if root.wildcard {
-        return path.is_absolute();
+        return path.is_absolute()
+            && root
+                .normalized_root
+                .as_ref()
+                .is_some_and(|prefix| path.starts_with(prefix));
     }
     root.normalized_root
         .as_ref()
@@ -594,6 +624,16 @@ fn default_protected_probe_paths() -> Vec<PathBuf> {
         .collect()
 }
 
+fn wildcard_probe_paths(prefix: &Path) -> Vec<PathBuf> {
+    if prefix == Path::new("/") || home_dir().as_deref() == Some(prefix) {
+        let protected = default_protected_probe_paths();
+        if !protected.is_empty() {
+            return protected;
+        }
+    }
+    vec![prefix.to_path_buf()]
+}
+
 fn home_dir() -> Option<PathBuf> {
     std::env::var_os("HOME").map(PathBuf::from)
 }
@@ -611,8 +651,8 @@ fn unix_timestamp() -> i64 {
 
 fn status_label(status: FileAccessStatus) -> &'static str {
     match status {
-        FileAccessStatus::NotChecked => "not_checked",
-        FileAccessStatus::Checking => "checking",
+        FileAccessStatus::NotChecked => "not_requested",
+        FileAccessStatus::Checking => "requesting",
         FileAccessStatus::Granted => "granted",
         FileAccessStatus::Denied => "denied",
         FileAccessStatus::Timeout => "timeout",
@@ -628,11 +668,44 @@ fn clamp_timeout(value: u64, min: u64, max: u64) -> u64 {
 
 pub fn configure_from_gateway(config: &FileAccessConfig) {
     configure(config.clone());
-    spawn_precheck();
+    request_permissions();
     info!(
         roots = %config.roots_text(),
-        precheck_timeout_seconds = config.precheck_timeout_seconds,
+        permission_timeout_seconds = config.permission_timeout_seconds,
         read_timeout_seconds = config.read_timeout_seconds,
-        "file access precheck started"
+        "file access permission request started"
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn home_wildcard_requests_protected_home_directories() {
+        let home = home_dir().expect("home dir");
+
+        let root = build_root("~/*", FileAccessStatus::NotChecked);
+
+        assert!(root.wildcard);
+        assert_eq!(root.normalized_root.as_deref(), Some(home.as_path()));
+        assert!(!root.probe_paths.is_empty());
+        assert!(root.probe_paths.iter().all(|path| path.starts_with(&home)));
+        assert!(root_matches_path(&root, &home.join("Downloads/image.png")));
+        assert!(!root_matches_path(&root, Path::new("/")));
+    }
+
+    #[test]
+    fn config_file_uses_permission_names() {
+        let file = FileAccessConfigFile {
+            permission_roots: Some(vec!["~/Downloads".to_string()]),
+            permission_timeout_seconds: Some(60),
+            read_timeout_seconds: Some(10),
+        };
+
+        let text = toml::to_string(&file).expect("serialize file access config");
+
+        assert!(text.contains("permission_roots"));
+        assert!(text.contains("permission_timeout_seconds"));
+    }
 }

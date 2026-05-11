@@ -1,7 +1,7 @@
 const serverInput = document.getElementById("server-url");
 const configMessage = document.getElementById("config-message");
 const fileAccessRootsInput = document.getElementById("file-access-roots");
-const fileAccessPrecheckTimeoutInput = document.getElementById("file-access-precheck-timeout");
+const fileAccessPermissionTimeoutInput = document.getElementById("file-access-permission-timeout");
 const fileAccessReadTimeoutInput = document.getElementById("file-access-read-timeout");
 const fileAccessMessage = document.getElementById("file-access-message");
 const fileAccessRootsList = document.getElementById("file-access-roots-list");
@@ -73,15 +73,34 @@ function setFileAccessNotice(text, tone = "") {
 
 function fileAccessStatusTone(status) {
   if (status === "granted") return "ok";
-  if (status === "checking" || status === "not_checked") return "warn";
+  if (status === "requesting" || status === "not_requested") return "warn";
   return "bad";
+}
+
+function fileAccessStatusLabel(status) {
+  const labels = {
+    not_requested: "未申请",
+    requesting: "申请中",
+    granted: "已授权",
+    denied: "已拒绝",
+    timeout: "已超时",
+    missing: "不存在",
+    invalid: "无效",
+    error: "异常",
+  };
+  return labels[status] || status || "-";
+}
+
+function allFileAccessGranted(fileAccess) {
+  const roots = fileAccess?.roots || [];
+  return roots.length > 0 && roots.every((root) => root.status === "granted");
 }
 
 function renderFileAccess(fileAccess) {
   const roots = fileAccess?.roots || [];
-  const allGranted = roots.length > 0 && roots.every((root) => root.status === "granted");
+  const allGranted = allFileAccessGranted(fileAccess);
   const running = Boolean(fileAccess?.running);
-  const stateText = running ? "checking" : (allGranted ? "granted" : "needs attention");
+  const stateText = running ? "申请中" : (allGranted ? "已授权" : "需要授权");
   setPill("file-access-state", !running && allGranted, stateText);
   if (running) {
     document.getElementById("file-access-state").className = "pill warn";
@@ -90,10 +109,10 @@ function renderFileAccess(fileAccess) {
     fileAccessRootsInput.value = fileAccess?.roots_text || "";
   }
   if (
-    document.activeElement !== fileAccessPrecheckTimeoutInput
-    && !fileAccessPrecheckTimeoutInput.dataset.dirty
+    document.activeElement !== fileAccessPermissionTimeoutInput
+    && !fileAccessPermissionTimeoutInput.dataset.dirty
   ) {
-    fileAccessPrecheckTimeoutInput.value = fileAccess?.precheck_timeout_seconds ?? 60;
+    fileAccessPermissionTimeoutInput.value = fileAccess?.permission_timeout_seconds ?? 60;
   }
   if (
     document.activeElement !== fileAccessReadTimeoutInput
@@ -102,11 +121,11 @@ function renderFileAccess(fileAccess) {
     fileAccessReadTimeoutInput.value = fileAccess?.read_timeout_seconds ?? 10;
   }
   if (!fileAccessMessage.dataset.locked) {
-    const updated = fileAccess?.updated_at ? `最近检查：${formatTime(fileAccess.updated_at)}` : "尚未完成检查";
-    setFileAccessNotice(running ? "正在预检查文件访问权限..." : updated);
+    const updated = fileAccess?.updated_at ? `最近申请：${formatTime(fileAccess.updated_at)}` : "尚未完成权限申请";
+    setFileAccessNotice(running ? "正在申请文件访问权限..." : updated);
   }
   if (!roots.length) {
-    fileAccessRootsList.innerHTML = `<div class="empty-state">未配置预检查目录</div>`;
+    fileAccessRootsList.innerHTML = `<div class="empty-state">未配置权限申请目录</div>`;
     return;
   }
   fileAccessRootsList.innerHTML = roots.map((root) => `
@@ -116,7 +135,7 @@ function renderFileAccess(fileAccess) {
         <span class="mono">${escapeHTML(root.normalized_root || "-")}</span>
         ${root.message ? `<span>${escapeHTML(root.message)}</span>` : ""}
       </div>
-      <span class="pill ${fileAccessStatusTone(root.status)}">${escapeHTML(root.status)}</span>
+      <span class="pill ${fileAccessStatusTone(root.status)}">${escapeHTML(fileAccessStatusLabel(root.status))}</span>
     </div>
   `).join("");
 }
@@ -265,7 +284,7 @@ serverInput.addEventListener("input", () => {
   configMessage.dataset.locked = "";
 });
 
-for (const input of [fileAccessRootsInput, fileAccessPrecheckTimeoutInput, fileAccessReadTimeoutInput]) {
+for (const input of [fileAccessRootsInput, fileAccessPermissionTimeoutInput, fileAccessReadTimeoutInput]) {
   input.addEventListener("input", () => {
     input.dataset.dirty = "true";
     fileAccessMessage.dataset.locked = "";
@@ -309,8 +328,8 @@ document.getElementById("save-server").addEventListener("click", (event) => {
 document.getElementById("rerun-file-access").addEventListener("click", (event) => {
   withButton(event.currentTarget, async () => {
     fileAccessMessage.dataset.locked = "true";
-    setFileAccessNotice("正在重新预检查...");
-    await fetchJSON("/api/file-access/precheck", { method: "POST" });
+    setFileAccessNotice("正在重新申请权限...");
+    await fetchJSON("/api/file-access/request", { method: "POST" });
     await refresh(false);
   }).catch((error) => setFileAccessNotice(error.message, "bad"));
 });
@@ -318,20 +337,20 @@ document.getElementById("rerun-file-access").addEventListener("click", (event) =
 document.getElementById("save-file-access").addEventListener("click", (event) => {
   withButton(event.currentTarget, async () => {
     fileAccessMessage.dataset.locked = "true";
-    setFileAccessNotice("正在保存并预检查...");
+    setFileAccessNotice("正在保存并申请权限...");
     const result = await fetchJSON("/api/config/file-access", {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        precheck_roots: fileAccessRootsInput.value.trim(),
-        precheck_timeout_seconds: Number(fileAccessPrecheckTimeoutInput.value || 60),
+        permission_roots: fileAccessRootsInput.value.trim(),
+        permission_timeout_seconds: Number(fileAccessPermissionTimeoutInput.value || 60),
         read_timeout_seconds: Number(fileAccessReadTimeoutInput.value || 10),
       }),
     });
     fileAccessRootsInput.dataset.dirty = "";
-    fileAccessPrecheckTimeoutInput.dataset.dirty = "";
+    fileAccessPermissionTimeoutInput.dataset.dirty = "";
     fileAccessReadTimeoutInput.dataset.dirty = "";
-    setFileAccessNotice(`已保存到 ${result.config_path}，正在后台预检查。`, "ok");
+    setFileAccessNotice(`已保存到 ${result.config_path}，正在后台申请权限。`, "ok");
     await refresh(false);
   }).catch((error) => setFileAccessNotice(error.message, "bad"));
 });

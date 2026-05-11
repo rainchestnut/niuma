@@ -103,8 +103,8 @@ pub struct FileAccessHelperArgs {
 
 #[derive(Debug, Subcommand, Clone)]
 pub enum FileAccessHelperCommands {
-    /// Probe whether a directory can be listed.
-    Precheck {
+    /// Request access by listing a directory.
+    Request {
         #[arg(long)]
         path: std::path::PathBuf,
     },

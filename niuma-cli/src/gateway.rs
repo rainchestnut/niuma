@@ -81,8 +81,10 @@ struct ServerUrlRequest {
 
 #[derive(Debug, Deserialize)]
 struct FileAccessConfigRequest {
-    precheck_roots: String,
-    precheck_timeout_seconds: u64,
+    #[serde(rename = "permission_roots")]
+    permission_roots: String,
+    #[serde(rename = "permission_timeout_seconds")]
+    permission_timeout_seconds: u64,
     read_timeout_seconds: u64,
 }
 
@@ -214,7 +216,10 @@ fn dashboard_router(state: GatewayState) -> Router {
         .route("/api/config/server-url", put(update_server_url))
         .route("/api/config/server-url/test", post(test_server_url))
         .route("/api/config/file-access", put(update_file_access_config))
-        .route("/api/file-access/precheck", post(run_file_access_precheck))
+        .route(
+            "/api/file-access/request",
+            post(request_file_access_permissions),
+        )
         .route("/api/pairings", get(paired_devices))
         .route("/api/pairings/{binding_id}", delete(delete_pairing))
         .route("/api/pairing/payload", get(pairing_payload))
@@ -299,8 +304,8 @@ async fn update_file_access_config(
     Json(request): Json<FileAccessConfigRequest>,
 ) -> Result<Json<FileAccessConfigResponse>, (StatusCode, Json<ApiError>)> {
     let file_access = FileAccessConfig::from_dashboard(
-        &request.precheck_roots,
-        request.precheck_timeout_seconds,
+        &request.permission_roots,
+        request.permission_timeout_seconds,
         request.read_timeout_seconds,
     );
     config::save_file_access_config(file_access.clone())
@@ -315,8 +320,8 @@ async fn update_file_access_config(
     }))
 }
 
-async fn run_file_access_precheck() -> Json<FileAccessSnapshot> {
-    file_access::spawn_precheck();
+async fn request_file_access_permissions() -> Json<FileAccessSnapshot> {
+    file_access::request_permissions();
     Json(file_access::snapshot())
 }
 
@@ -697,6 +702,8 @@ mod tests {
             .expect("html response");
         assert!(html.contains(r#"<link rel="stylesheet" href="/static/dashboard.css" />"#));
         assert!(html.contains(r#"<script src="/static/dashboard.js"></script>"#));
+        assert!(html.contains("保存并申请权限"));
+        assert!(!html.contains("保存并预检查"));
         assert!(!html.contains("const serverInput"));
 
         let css = client
