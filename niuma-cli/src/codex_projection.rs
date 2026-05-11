@@ -12,6 +12,7 @@ use std::sync::OnceLock;
 use url::Url;
 
 use crate::diff_summary;
+use crate::file_access::FileReadOutcome;
 use crate::process_summary::{mcp_tool_call_value, process_summary_payload};
 use crate::thread_status::normalize_thread_status;
 use crate::transfers::{encode_content_parts_payload, file_bytes_from_part, sha256_hex};
@@ -272,7 +273,7 @@ pub(crate) fn item_mobile_ciphertext(item: &Value) -> String {
     let mut parts = content_parts_from_text(&text);
     collect_item_files(item, &mut parts);
     collect_mcp_tool_result_files(item, &mut parts);
-    if parts.iter().any(crate::transfers::is_inline_file_part) {
+    if should_encode_generated_parts(&parts) {
         encode_content_parts_payload(&parts)
     } else {
         text
@@ -420,7 +421,8 @@ fn content_parts_from_text(text: &str) -> Vec<Value> {
             .unwrap_or("");
         let alt = capture.name("alt").map(|value| value.as_str());
         match file_part_from_markdown_url(url, alt) {
-            Some(part) => parts.push(part),
+            Some(LocalFileProjection::TransferPart(part)) => parts.push(part),
+            Some(LocalFileProjection::PathOnlyNote(part)) => parts.push(part),
             None => parts.push(json!({ "type": "text", "text": full.as_str() })),
         }
         cursor = full.end();
@@ -462,13 +464,14 @@ fn collect_item_files(value: &Value, parts: &mut Vec<Value>) {
                     .or_else(|| map.get("file_path"))
                     .or_else(|| map.get("url"))
                     .and_then(Value::as_str)
-                && let Some(path) = local_markdown_image_path(path_value).or_else(|| {
-                    Some(std::path::PathBuf::from(path_value)).filter(|path| path.is_file())
-                })
+                && let Some(path) = local_path_from_ref(path_value)
                 && let Some(part) =
                     file_part_from_local_path(&path, string_field(value, "alt").as_deref())
             {
-                parts.push(part);
+                match part {
+                    LocalFileProjection::TransferPart(part)
+                    | LocalFileProjection::PathOnlyNote(part) => parts.push(part),
+                }
                 return;
             }
             if matches!(item_type, "input_image" | "image" | "output_image") {
@@ -557,11 +560,14 @@ fn collect_tool_text_file_parts(text: &str, parts: &mut Vec<Value>) {
         let Some(raw_ref) = capture.name("ref").map(|value| value.as_str()) else {
             continue;
         };
-        let Some(path) = local_markdown_image_path(raw_ref) else {
+        let Some(path) = local_path_from_ref(raw_ref) else {
             continue;
         };
         if let Some(part) = file_part_from_local_path(&path, None) {
-            push_unique_file_part(parts, part);
+            match part {
+                LocalFileProjection::TransferPart(part) => push_unique_file_part(parts, part),
+                LocalFileProjection::PathOnlyNote(part) => parts.push(part),
+            }
         }
     }
 }
@@ -589,6 +595,16 @@ fn push_unique_file_part(parts: &mut Vec<Value>, part: Value) {
     if !already_present {
         parts.push(part);
     }
+}
+
+fn should_encode_generated_parts(parts: &[Value]) -> bool {
+    parts
+        .iter()
+        .any(|part| crate::transfers::is_inline_file_part(part) || is_local_path_note_part(part))
+}
+
+fn is_local_path_note_part(part: &Value) -> bool {
+    part.get("source").and_then(Value::as_str) == Some("local_file_path_only")
 }
 
 fn collect_item_text(value: &Value, texts: &mut Vec<String>) {
@@ -702,16 +718,21 @@ fn item_type_hints(item: &Value) -> Vec<String> {
     hints
 }
 
-fn file_part_from_markdown_url(raw_url: &str, alt: Option<&str>) -> Option<Value> {
+enum LocalFileProjection {
+    TransferPart(Value),
+    PathOnlyNote(Value),
+}
+
+fn file_part_from_markdown_url(raw_url: &str, alt: Option<&str>) -> Option<LocalFileProjection> {
     let url = raw_url.trim().trim_start_matches('<').trim_end_matches('>');
     if url.starts_with("data:image/") {
-        return file_part_from_data_url(url, None, alt);
+        return file_part_from_data_url(url, None, alt).map(LocalFileProjection::TransferPart);
     }
-    let path = local_markdown_image_path(url)?;
+    let path = local_path_from_ref(url)?;
     file_part_from_local_path(&path, alt)
 }
 
-fn local_markdown_image_path(raw_url: &str) -> Option<std::path::PathBuf> {
+fn local_path_from_ref(raw_url: &str) -> Option<std::path::PathBuf> {
     let path_text = if raw_url.starts_with("file://") {
         let parsed = Url::parse(raw_url).ok()?;
         if parsed.scheme() != "file" || !matches!(parsed.host_str(), None | Some("localhost")) {
@@ -724,21 +745,48 @@ fn local_markdown_image_path(raw_url: &str) -> Option<std::path::PathBuf> {
         return None;
     };
     let path = std::path::PathBuf::from(path_text);
-    path.is_file().then_some(path)
+    path.is_absolute().then_some(path)
 }
 
-fn file_part_from_local_path(path: &std::path::Path, alt: Option<&str>) -> Option<Value> {
+fn file_part_from_local_path(
+    path: &std::path::Path,
+    alt: Option<&str>,
+) -> Option<LocalFileProjection> {
     let mime_type = local_image_mime_type(path)?;
     if !is_mobile_renderable_image_mime(&mime_type) {
         return None;
     }
-    let body = std::fs::read(path).ok()?;
+    let body = match crate::file_access::read_file_for_transfer(path) {
+        FileReadOutcome::Bytes(body) => body,
+        FileReadOutcome::PathOnly { path, reason } => {
+            return Some(LocalFileProjection::PathOnlyNote(
+                local_file_path_note_part(&path, &reason, alt),
+            ));
+        }
+    };
     let data_url = format!("data:{mime_type};base64,{}", STANDARD.encode(&body));
     file_part_from_data_url(
         &data_url,
         path.file_name().and_then(|name| name.to_str()),
         alt,
     )
+    .map(LocalFileProjection::TransferPart)
+    .or_else(|| {
+        Some(LocalFileProjection::PathOnlyNote(
+            local_file_path_note_part(&path.to_string_lossy(), "文件不是有效图片", alt),
+        ))
+    })
+}
+
+fn local_file_path_note_part(path: &str, reason: &str, alt: Option<&str>) -> Value {
+    let label = alt
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("本地文件");
+    json!({
+        "type": "text",
+        "source": "local_file_path_only",
+        "text": format!("{label}未传输：{path}\n原因：{reason}"),
+    })
 }
 
 fn file_part_from_data_url(

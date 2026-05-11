@@ -1,5 +1,10 @@
 const serverInput = document.getElementById("server-url");
 const configMessage = document.getElementById("config-message");
+const fileAccessRootsInput = document.getElementById("file-access-roots");
+const fileAccessPrecheckTimeoutInput = document.getElementById("file-access-precheck-timeout");
+const fileAccessReadTimeoutInput = document.getElementById("file-access-read-timeout");
+const fileAccessMessage = document.getElementById("file-access-message");
+const fileAccessRootsList = document.getElementById("file-access-roots-list");
 const pairingMessage = document.getElementById("pairing-message");
 const pairingsElement = document.getElementById("pairings");
 const confirmDialog = document.getElementById("confirm-dialog");
@@ -61,6 +66,61 @@ function setPairingNotice(text, tone = "") {
   pairingMessage.textContent = text || "-";
 }
 
+function setFileAccessNotice(text, tone = "") {
+  fileAccessMessage.className = `notice ${tone}`;
+  fileAccessMessage.textContent = text;
+}
+
+function fileAccessStatusTone(status) {
+  if (status === "granted") return "ok";
+  if (status === "checking" || status === "not_checked") return "warn";
+  return "bad";
+}
+
+function renderFileAccess(fileAccess) {
+  const roots = fileAccess?.roots || [];
+  const allGranted = roots.length > 0 && roots.every((root) => root.status === "granted");
+  const running = Boolean(fileAccess?.running);
+  const stateText = running ? "checking" : (allGranted ? "granted" : "needs attention");
+  setPill("file-access-state", !running && allGranted, stateText);
+  if (running) {
+    document.getElementById("file-access-state").className = "pill warn";
+  }
+  if (document.activeElement !== fileAccessRootsInput && !fileAccessRootsInput.dataset.dirty) {
+    fileAccessRootsInput.value = fileAccess?.roots_text || "";
+  }
+  if (
+    document.activeElement !== fileAccessPrecheckTimeoutInput
+    && !fileAccessPrecheckTimeoutInput.dataset.dirty
+  ) {
+    fileAccessPrecheckTimeoutInput.value = fileAccess?.precheck_timeout_seconds ?? 60;
+  }
+  if (
+    document.activeElement !== fileAccessReadTimeoutInput
+    && !fileAccessReadTimeoutInput.dataset.dirty
+  ) {
+    fileAccessReadTimeoutInput.value = fileAccess?.read_timeout_seconds ?? 10;
+  }
+  if (!fileAccessMessage.dataset.locked) {
+    const updated = fileAccess?.updated_at ? `最近检查：${formatTime(fileAccess.updated_at)}` : "尚未完成检查";
+    setFileAccessNotice(running ? "正在预检查文件访问权限..." : updated);
+  }
+  if (!roots.length) {
+    fileAccessRootsList.innerHTML = `<div class="empty-state">未配置预检查目录</div>`;
+    return;
+  }
+  fileAccessRootsList.innerHTML = roots.map((root) => `
+    <div class="file-access-row">
+      <div class="file-access-path">
+        <strong class="mono">${escapeHTML(root.root)}</strong>
+        <span class="mono">${escapeHTML(root.normalized_root || "-")}</span>
+        ${root.message ? `<span>${escapeHTML(root.message)}</span>` : ""}
+      </div>
+      <span class="pill ${fileAccessStatusTone(root.status)}">${escapeHTML(root.status)}</span>
+    </div>
+  `).join("");
+}
+
 function renderStatus(status) {
   setText("gateway-mode", status.mode);
   document.getElementById("gateway-mode").className = "pill ok";
@@ -91,6 +151,7 @@ function renderStatus(status) {
       : "配置变更需要重启 Gateway 后生效。";
     setNotice(restartHint);
   }
+  renderFileAccess(status.file_access);
 }
 
 function renderPairings(devices) {
@@ -204,6 +265,13 @@ serverInput.addEventListener("input", () => {
   configMessage.dataset.locked = "";
 });
 
+for (const input of [fileAccessRootsInput, fileAccessPrecheckTimeoutInput, fileAccessReadTimeoutInput]) {
+  input.addEventListener("input", () => {
+    input.dataset.dirty = "true";
+    fileAccessMessage.dataset.locked = "";
+  });
+}
+
 document.getElementById("refresh").addEventListener("click", (event) => {
   withButton(event.currentTarget, () => refresh(true).catch((error) => setNotice(error.message, "bad")));
 });
@@ -236,6 +304,36 @@ document.getElementById("save-server").addEventListener("click", (event) => {
     setNotice(`已保存，重启 Gateway 后生效。${override}`, "ok");
     await refresh(false);
   }).catch((error) => setNotice(error.message, "bad"));
+});
+
+document.getElementById("rerun-file-access").addEventListener("click", (event) => {
+  withButton(event.currentTarget, async () => {
+    fileAccessMessage.dataset.locked = "true";
+    setFileAccessNotice("正在重新预检查...");
+    await fetchJSON("/api/file-access/precheck", { method: "POST" });
+    await refresh(false);
+  }).catch((error) => setFileAccessNotice(error.message, "bad"));
+});
+
+document.getElementById("save-file-access").addEventListener("click", (event) => {
+  withButton(event.currentTarget, async () => {
+    fileAccessMessage.dataset.locked = "true";
+    setFileAccessNotice("正在保存并预检查...");
+    const result = await fetchJSON("/api/config/file-access", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        precheck_roots: fileAccessRootsInput.value.trim(),
+        precheck_timeout_seconds: Number(fileAccessPrecheckTimeoutInput.value || 60),
+        read_timeout_seconds: Number(fileAccessReadTimeoutInput.value || 10),
+      }),
+    });
+    fileAccessRootsInput.dataset.dirty = "";
+    fileAccessPrecheckTimeoutInput.dataset.dirty = "";
+    fileAccessReadTimeoutInput.dataset.dirty = "";
+    setFileAccessNotice(`已保存到 ${result.config_path}，正在后台预检查。`, "ok");
+    await refresh(false);
+  }).catch((error) => setFileAccessNotice(error.message, "bad"));
 });
 
 pairingsElement.addEventListener("click", (event) => {

@@ -11,6 +11,7 @@ mod codex_projection;
 mod config;
 mod crypto;
 mod diff_summary;
+mod file_access;
 mod gateway;
 mod identity;
 mod logging;
@@ -31,19 +32,25 @@ use cli::{Cli, Commands, ServiceCommands};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let _log_guard = logging::init()?;
     let cli = Cli::parse();
     match cli.command {
-        Commands::Gateway(args) => gateway::run(args).await,
-        Commands::Status(args) => status::print_gateway_status(args).await,
-        Commands::Reset(args) => service::reset(args).await,
-        Commands::Service { command } => match command {
-            ServiceCommands::Install(args) => service::install(args).await,
-            ServiceCommands::Start => service::start().await,
-            ServiceCommands::Stop => service::stop().await,
-            ServiceCommands::Restart => service::restart().await,
-            ServiceCommands::Uninstall => service::uninstall().await,
-            ServiceCommands::Status => service::print_status().await,
-        },
+        Commands::FileAccessHelper(args) => file_access::run_helper(args),
+        command => {
+            let _log_guard = logging::init()?;
+            match command {
+                Commands::Gateway(args) => gateway::run(args).await,
+                Commands::Status(args) => status::print_gateway_status(args).await,
+                Commands::Reset(args) => service::reset(args).await,
+                Commands::Service { command } => match command {
+                    ServiceCommands::Install(args) => service::install(args).await,
+                    ServiceCommands::Start => service::start().await,
+                    ServiceCommands::Stop => service::stop().await,
+                    ServiceCommands::Restart => service::restart().await,
+                    ServiceCommands::Uninstall => service::uninstall().await,
+                    ServiceCommands::Status => service::print_status().await,
+                },
+                Commands::FileAccessHelper(_) => unreachable!("helper handled before logging"),
+            }
+        }
     }
 }

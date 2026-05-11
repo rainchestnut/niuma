@@ -565,6 +565,10 @@ mod tests {
 
     #[test]
     fn mcp_tool_call_text_path_becomes_image_part_without_prefix_dependency() {
+        crate::file_access::configure_test_roots(
+            vec![std::env::temp_dir().to_string_lossy().into_owned()],
+            crate::file_access::FileAccessStatus::Granted,
+        );
         let path = write_test_jpeg("mcp-tool-artifact");
         let tool_text = format!("Created artifact at {} (image/jpeg)", path.display());
 

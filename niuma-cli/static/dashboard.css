@@ -211,11 +211,22 @@ input {
   font: inherit;
 }
 
+input[type="number"] {
+  appearance: textfield;
+}
+
 label {
   display: grid;
   gap: 8px;
   font-size: 13px;
   font-weight: 700;
+}
+
+.timeout-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  margin-top: 12px;
 }
 
 .pill {
@@ -408,6 +419,40 @@ dd {
   font-size: 13px;
 }
 
+.file-access-list {
+  display: grid;
+  gap: 10px;
+  margin-top: 14px;
+}
+
+.file-access-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: start;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-2);
+}
+
+.file-access-path {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.file-access-path strong {
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.file-access-path span {
+  color: var(--muted);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
 details {
   border: 1px solid var(--line);
   border-radius: 8px;
@@ -556,5 +601,10 @@ pre {
 
   button.icon-button {
     justify-self: start;
+  }
+
+  .timeout-grid,
+  .file-access-row {
+    grid-template-columns: 1fr;
   }
 }

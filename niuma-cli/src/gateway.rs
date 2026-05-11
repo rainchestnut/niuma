@@ -22,6 +22,7 @@ use crate::cli::GatewayArgs;
 use crate::codex::{self, CodexRuntime};
 use crate::codex_app_server::CodexAppServerClient;
 use crate::config::{self, ConfigValueSource, GatewayConfig};
+use crate::file_access::{self, FileAccessConfig, FileAccessSnapshot};
 use crate::identity::AgentIdentity;
 use crate::pairing::{self, PairingMaterial, PairingPayload, PairingRuntimeState};
 use crate::paths;
@@ -70,11 +71,25 @@ struct GatewayStatus {
     open_browser: bool,
     started_at: i64,
     last_pairing_error: Option<String>,
+    file_access: FileAccessSnapshot,
 }
 
 #[derive(Debug, Deserialize)]
 struct ServerUrlRequest {
     server_url: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct FileAccessConfigRequest {
+    precheck_roots: String,
+    precheck_timeout_seconds: u64,
+    read_timeout_seconds: u64,
+}
+
+#[derive(Debug, Serialize)]
+struct FileAccessConfigResponse {
+    file_access: FileAccessSnapshot,
+    config_path: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -106,6 +121,7 @@ struct PairingDeleteResponse {
 pub async fn run(args: GatewayArgs) -> Result<()> {
     let config = GatewayConfig::from_args(&args)?;
     paths::ensure_state_dirs()?;
+    file_access::configure_from_gateway(&config.file_access);
     let identity = AgentIdentity::load_or_create(&config.device_name)?;
     let codex_runtime = codex::resolve(config.disable_codex_plugins);
     let codex_app_server = if config.pairing_page_only {
@@ -197,6 +213,8 @@ fn dashboard_router(state: GatewayState) -> Router {
         .route("/api/status", get(api_status))
         .route("/api/config/server-url", put(update_server_url))
         .route("/api/config/server-url/test", post(test_server_url))
+        .route("/api/config/file-access", put(update_file_access_config))
+        .route("/api/file-access/precheck", post(run_file_access_precheck))
         .route("/api/pairings", get(paired_devices))
         .route("/api/pairings/{binding_id}", delete(delete_pairing))
         .route("/api/pairing/payload", get(pairing_payload))
@@ -275,6 +293,31 @@ async fn update_server_url(
             ConfigValueSource::Cli | ConfigValueSource::Env
         ),
     }))
+}
+
+async fn update_file_access_config(
+    Json(request): Json<FileAccessConfigRequest>,
+) -> Result<Json<FileAccessConfigResponse>, (StatusCode, Json<ApiError>)> {
+    let file_access = FileAccessConfig::from_dashboard(
+        &request.precheck_roots,
+        request.precheck_timeout_seconds,
+        request.read_timeout_seconds,
+    );
+    config::save_file_access_config(file_access.clone())
+        .map_err(|err| api_error(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()))?;
+    file_access::configure_from_gateway(&file_access);
+    let config_path = paths::config_path()
+        .map(|path| path.display().to_string())
+        .unwrap_or_default();
+    Ok(Json(FileAccessConfigResponse {
+        file_access: file_access::snapshot(),
+        config_path,
+    }))
+}
+
+async fn run_file_access_precheck() -> Json<FileAccessSnapshot> {
+    file_access::spawn_precheck();
+    Json(file_access::snapshot())
 }
 
 async fn test_server_url(
@@ -524,6 +567,7 @@ async fn build_status(state: &GatewayState) -> GatewayStatus {
         open_browser: state.config.open_browser,
         started_at: state.started_at,
         last_pairing_error: pairing.last_error.clone(),
+        file_access: file_access::snapshot(),
     }
 }
 
@@ -838,6 +882,7 @@ mod tests {
                 dashboard_host: "127.0.0.1".to_string(),
                 dashboard_port: 8765,
                 heartbeat_seconds: 30,
+                file_access: FileAccessConfig::default(),
                 pairing_page_only: true,
                 open_browser: false,
                 disable_codex_plugins: false,

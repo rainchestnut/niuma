@@ -22,6 +22,9 @@ pub enum Commands {
     Status(StatusArgs),
     /// Stop service state and delete ~/.niuma. Requires --yes.
     Reset(ResetArgs),
+    /// Internal helper used to isolate macOS file-access prompts.
+    #[command(hide = true)]
+    FileAccessHelper(FileAccessHelperArgs),
 }
 
 #[derive(Debug, Args, Clone)]
@@ -90,4 +93,26 @@ pub struct ResetArgs {
     /// Confirm destructive deletion of local Niuma state.
     #[arg(long)]
     pub yes: bool,
+}
+
+#[derive(Debug, Args, Clone)]
+pub struct FileAccessHelperArgs {
+    #[command(subcommand)]
+    pub command: FileAccessHelperCommands,
+}
+
+#[derive(Debug, Subcommand, Clone)]
+pub enum FileAccessHelperCommands {
+    /// Probe whether a directory can be listed.
+    Precheck {
+        #[arg(long)]
+        path: std::path::PathBuf,
+    },
+    /// Copy a readable file into a caller-owned temporary path.
+    Copy {
+        #[arg(long)]
+        path: std::path::PathBuf,
+        #[arg(long)]
+        output: std::path::PathBuf,
+    },
 }

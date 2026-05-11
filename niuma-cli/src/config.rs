@@ -4,6 +4,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::cli::{GatewayArgs, StatusArgs};
+use crate::file_access::{FileAccessConfig, FileAccessConfigFile};
 use crate::paths;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -18,6 +19,8 @@ pub struct ConfigFile {
     pub dashboard_port: Option<u16>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub heartbeat_seconds: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file_access: Option<FileAccessConfigFile>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -37,6 +40,7 @@ pub struct GatewayConfig {
     pub dashboard_host: String,
     pub dashboard_port: u16,
     pub heartbeat_seconds: u64,
+    pub file_access: FileAccessConfig,
     pub pairing_page_only: bool,
     pub open_browser: bool,
     pub disable_codex_plugins: bool,
@@ -81,6 +85,9 @@ impl GatewayConfig {
             heartbeat_seconds: env_u64("NIUMA_HEARTBEAT_SECONDS")
                 .or_else(|| file.as_ref().and_then(|value| value.heartbeat_seconds))
                 .unwrap_or(30),
+            file_access: FileAccessConfig::from_config_file(
+                file.as_ref().and_then(|value| value.file_access.as_ref()),
+            ),
             pairing_page_only: args.pairing_page_only,
             open_browser: !args.no_open,
             disable_codex_plugins: args.disable_codex_plugins,
@@ -134,6 +141,14 @@ pub fn write_config_file(file: &ConfigFile) -> Result<()> {
 pub fn save_server_url(server_url: &str) -> Result<ConfigFile> {
     let mut file = read_config_file()?.unwrap_or_default();
     file.server_url = Some(server_url.to_string());
+    write_config_file(&file)?;
+    Ok(file)
+}
+
+/// Replace only local file-access settings while preserving unrelated config.
+pub fn save_file_access_config(file_access: FileAccessConfig) -> Result<ConfigFile> {
+    let mut file = read_config_file()?.unwrap_or_default();
+    file.file_access = Some(file_access.into_config_file());
     write_config_file(&file)?;
     Ok(file)
 }
