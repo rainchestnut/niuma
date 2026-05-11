@@ -4,7 +4,7 @@
 //! workspace roots and app-server thread lists, then emits thread-centric mobile
 //! metadata.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -71,6 +71,14 @@ struct CodexGlobalState {
     projectless_thread_ids: Vec<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct GitWorkspaceSignature {
+    // A saved root and a Codex worktree belong to the same mobile project when
+    // they share the same repository storage and the same subdirectory prefix.
+    common_dir: String,
+    prefix: String,
+}
+
 pub struct CodexWorkspaceStore {
     global_state_path: PathBuf,
 }
@@ -114,9 +122,23 @@ impl CodexWorkspaceStore {
     /// Find a workspace project by its Codex thread working directory.
     pub fn project_for_cwd(&self, cwd: &str) -> Option<ProjectSummary> {
         let normalized_cwd = normalize_root(cwd);
-        self.list_projects()
-            .into_iter()
+        let projects = self.list_projects();
+        if let Some(project) = projects
+            .iter()
             .find(|project| project.cwd.as_deref() == Some(normalized_cwd.as_str()))
+        {
+            return Some(project.clone());
+        }
+
+        let cwd_signature = git_workspace_signature(&normalized_cwd)?;
+        projects.into_iter().find(|project| {
+            project
+                .cwd
+                .as_deref()
+                .and_then(git_workspace_signature)
+                .as_ref()
+                == Some(&cwd_signature)
+        })
     }
 
     /// Return Codex desktop's explicit conversation ids that have no project.
@@ -208,18 +230,24 @@ impl CodexMetadataProjector {
         let Some(cwd) = project.cwd.as_deref() else {
             return Ok(Vec::new());
         };
-        let current_branch = current_git_branch(cwd);
         let mut threads_by_id = HashMap::new();
-        for archived in [false, true] {
-            for payload in self.app_server.list_thread_payloads(cwd, archived).await? {
-                let thread = project_thread(
-                    &payload,
-                    Some(&project.project_id),
-                    Some(cwd),
-                    current_branch.clone(),
-                    Some(archived),
-                )?;
-                threads_by_id.insert(thread.thread_id.clone(), thread);
+        for thread_cwd in worktree_cwds_for_root(cwd) {
+            let current_branch = current_git_branch(&thread_cwd);
+            for archived in [false, true] {
+                for payload in self
+                    .app_server
+                    .list_thread_payloads(&thread_cwd, archived)
+                    .await?
+                {
+                    let thread = project_thread(
+                        &payload,
+                        Some(&project.project_id),
+                        Some(&thread_cwd),
+                        current_branch.clone(),
+                        Some(archived),
+                    )?;
+                    threads_by_id.insert(thread.thread_id.clone(), thread);
+                }
             }
         }
         Ok(threads_by_id.into_values().collect())
@@ -378,6 +406,53 @@ fn git_stdout(cwd: &str, args: &[&str]) -> Option<String> {
     } else {
         Some(trimmed.to_string())
     }
+}
+
+fn worktree_cwds_for_root(root: &str) -> Vec<String> {
+    let normalized_root = normalize_root(root);
+    let mut seen = HashSet::new();
+    let mut roots = Vec::new();
+    seen.insert(normalized_root.clone());
+    roots.push(normalized_root.clone());
+
+    // Codex can create temporary Git worktrees for the same repository. Query
+    // those cwd values too, but project them back to the saved workspace root.
+    let project_prefix =
+        git_stdout(&normalized_root, &["rev-parse", "--show-prefix"]).unwrap_or_default();
+    let Some(output) = git_stdout(&normalized_root, &["worktree", "list", "--porcelain"]) else {
+        return roots;
+    };
+    for line in output.lines() {
+        let Some(path) = line.strip_prefix("worktree ") else {
+            continue;
+        };
+        let project_prefix = project_prefix.trim_end_matches('/');
+        let candidate = if project_prefix.is_empty() {
+            PathBuf::from(path)
+        } else {
+            Path::new(path).join(project_prefix)
+        };
+        let normalized = normalize_root(&candidate.to_string_lossy());
+        if !normalized.is_empty() && seen.insert(normalized.clone()) {
+            roots.push(normalized);
+        }
+    }
+    roots
+}
+
+fn git_common_dir(cwd: &str) -> Option<String> {
+    git_stdout(
+        cwd,
+        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+    )
+    .map(|path| normalize_root(&path))
+}
+
+fn git_workspace_signature(cwd: &str) -> Option<GitWorkspaceSignature> {
+    Some(GitWorkspaceSignature {
+        common_dir: git_common_dir(cwd)?,
+        prefix: git_stdout(cwd, &["rev-parse", "--show-prefix"]).unwrap_or_default(),
+    })
 }
 
 fn empty_state() -> CodexGlobalState {
@@ -598,8 +673,74 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
+    #[test]
+    fn project_for_cwd_maps_git_worktree_to_saved_project() {
+        let parent = temp_git_root("worktree-project-map");
+        let main_root = parent.join("main");
+        let worktree_root = parent.join("feature-worktree");
+        init_git_repo(&main_root);
+        run_git(
+            &main_root,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "codex/worktree-feature",
+                worktree_root.to_str().unwrap(),
+            ],
+        );
+        let state_path = parent.join("state.json");
+        std::fs::write(
+            &state_path,
+            serde_json::to_string(&json!({
+                "project-order": [main_root.to_str().unwrap()],
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let store = CodexWorkspaceStore {
+            global_state_path: state_path,
+        };
+        let project = store
+            .project_for_cwd(worktree_root.to_str().unwrap())
+            .unwrap();
+
+        assert_eq!(
+            project.cwd.as_deref(),
+            Some(normalize_root(main_root.to_str().unwrap()).as_str())
+        );
+        assert_eq!(
+            project.project_id,
+            project_id_for_root(&normalize_root(main_root.to_str().unwrap()))
+        );
+        let canonical_worktree = std::fs::canonicalize(&worktree_root)
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        assert!(worktree_cwds_for_root(main_root.to_str().unwrap()).contains(&canonical_worktree));
+        let _ = std::fs::remove_dir_all(parent);
+    }
+
     fn temp_git_root(name: &str) -> PathBuf {
         std::env::temp_dir().join(format!("niuma-metadata-{name}-{}", uuid::Uuid::new_v4()))
+    }
+
+    fn init_git_repo(root: &Path) {
+        run_git(root, &["init"]);
+        run_git(
+            root,
+            &[
+                "-c",
+                "user.name=Niuma",
+                "-c",
+                "user.email=niuma@example.invalid",
+                "commit",
+                "--allow-empty",
+                "-m",
+                "initial",
+            ],
+        );
     }
 
     fn run_git(root: &Path, args: &[&str]) {
