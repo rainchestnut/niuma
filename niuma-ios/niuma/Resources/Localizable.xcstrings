@@ -4495,6 +4495,22 @@
         }
       }
     },
+    "thread.intelligence.accessibility" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Select model and reasoning effort"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "选择模型和思考深度"
+          }
+        }
+      }
+    },
     "thread.permissions.accessibility" : {
       "extractionState" : "stale",
       "localizations" : {

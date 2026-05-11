@@ -17,7 +17,7 @@ struct ThreadComposerBar: View {
     let onRemoveAttachment: (OutgoingAttachment) -> Void
     let onSend: () -> Void
 
-    private let reasoningEfforts: [ReasoningEffort] = [.xhigh, .high, .medium, .low]
+    private let reasoningEfforts: [ReasoningEffort] = [.low, .medium, .high, .xhigh]
     private let permissionPresets: [ApprovalPermissionPreset] = [
         .defaultPermissions,
         .autoReview,
@@ -40,44 +40,7 @@ struct ThreadComposerBar: View {
                     if let currentBranch {
                         ComposerBranchPill(branch: currentBranch)
                     }
-                    if appModel.availableModels.isEmpty {
-                        ComposerPill(title: appModel.displayedModelID)
-                    } else {
-                        Menu {
-                            ForEach(appModel.availableModels, id: \.self) { modelID in
-                                Button {
-                                    appModel.selectModel(modelID)
-                                } label: {
-                                    if appModel.selectedModelID == modelID {
-                                        Label(modelID, systemImage: "checkmark")
-                                    } else {
-                                        Text(modelID)
-                                    }
-                                }
-                            }
-                        } label: {
-                            ComposerPill(title: appModel.displayedModelID)
-                        }
-                        .buttonStyle(.plain)
-                    }
-                    Menu {
-                        ForEach(reasoningEfforts) { effort in
-                            Button {
-                                appModel.selectReasoningEffort(effort)
-                            } label: {
-                                if appModel.selectedReasoningEffort == effort {
-                                    Label(effort.rawValue, systemImage: "checkmark")
-                                } else {
-                                    Text(effort.rawValue)
-                                }
-                            }
-                        }
-                    } label: {
-                        ComposerPill(title: appModel.selectedReasoningEffort.rawValue)
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel(appModel.localized("thread.reasoning.accessibility"))
-                    .accessibilityIdentifier("thread-reasoning-effort-menu")
+                    intelligenceMenu
                     permissionMenu
                     Spacer()
                 }
@@ -247,6 +210,54 @@ struct ThreadComposerBar: View {
     private func openFilePicker() {
         closeAttachmentPanel()
         onPickFile()
+    }
+
+    private var intelligenceMenu: some View {
+        Menu {
+            ForEach(reasoningEfforts) { effort in
+                Button {
+                    appModel.selectReasoningEffort(effort)
+                } label: {
+                    menuLabel(
+                        title: effort.rawValue,
+                        isSelected: appModel.selectedReasoningEffort == effort
+                    )
+                }
+            }
+
+            if !appModel.availableModels.isEmpty {
+                Divider()
+
+                Section(appModel.localized("model.placeholder")) {
+                    ForEach(appModel.availableModels, id: \.self) { modelID in
+                        Button {
+                            appModel.selectModel(modelID)
+                        } label: {
+                            menuLabel(
+                                title: modelID,
+                                isSelected: appModel.selectedModelID == modelID
+                            )
+                        }
+                    }
+                }
+            }
+        } label: {
+            ComposerPill(title: intelligencePillTitle, maxWidth: 158)
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(appModel.localized("thread.intelligence.accessibility"))
+        .accessibilityIdentifier("thread-intelligence-menu")
+    }
+
+    private var intelligencePillTitle: String {
+        "\(compactModelTitle(appModel.displayedModelID)) \(appModel.selectedReasoningEffort.rawValue)"
+    }
+
+    private func compactModelTitle(_ modelID: String) -> String {
+        if modelID.lowercased().hasPrefix("gpt-") {
+            return String(modelID.dropFirst(4))
+        }
+        return modelID
     }
 
     private var permissionMenu: some View {
@@ -490,14 +501,17 @@ struct ThreadBottomFade: View {
 
 struct ComposerPill: View {
     let title: String
+    var maxWidth: CGFloat?
 
     var body: some View {
         Text(title)
             .font(.caption2.weight(.semibold))
             .foregroundStyle(NiumaPalette.mutedInk)
             .lineLimit(1)
+            .truncationMode(.middle)
             .padding(.horizontal, 10)
             .padding(.vertical, 6)
+            .frame(maxWidth: maxWidth, alignment: .leading)
             .background(Capsule().fill(NiumaPalette.raisedCard))
     }
 }
