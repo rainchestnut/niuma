@@ -32,6 +32,39 @@ extension AppModel {
         }
     }
 
+    /// Updates the Codex source thread title through the paired desktop gateway.
+    /// The local row is refreshed only after Codex emits canonical thread metadata.
+    func renameThread(_ thread: ThreadSummary, title: String) async {
+        guard let identity, let selectedAgent else { return }
+        let trimmedTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedTitle.isEmpty, trimmedTitle != thread.title else { return }
+        guard !renamingThreadIDs.contains(thread.threadID) else { return }
+        renamingThreadIDs.insert(thread.threadID)
+        do {
+            let requestID = UUID().uuidString.lowercased()
+            try await sendRealtimeRequestWithRecovery(
+                identity: identity,
+                agent: selectedAgent,
+                operationLabel: "thread_rename",
+                forceReconnect: connectionState != .connected
+            ) { controller in
+                try await controller.requestThreadRename(
+                    request: ThreadRenameRequestData(
+                        requestID: requestID,
+                        deviceID: identity.deviceID,
+                        threadID: thread.threadID,
+                        title: trimmedTitle
+                    )
+                )
+            }
+        } catch {
+            renamingThreadIDs.remove(thread.threadID)
+            if !isTransientRealtimeDisconnect(error) {
+                pendingError = error.localizedDescription
+            }
+        }
+    }
+
     func refreshBranchChanges(threadID: String, baseRef: String? = nil) async {
         guard let identity, let selectedAgent else { return }
         do {

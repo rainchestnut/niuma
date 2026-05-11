@@ -230,6 +230,19 @@ final class LiveNiumaController: NiumaControlling {
         )
     }
 
+    func requestThreadRename(request: ThreadRenameRequestData) async throws {
+        logger.info("mobile_ws_thread_rename_send request_id=\(request.requestID, privacy: .public) thread_id=\(request.threadID, privacy: .public)")
+        try await sendWebSocket(
+            LiveThreadRenameRequestMessage(
+                kind: "thread_rename_request",
+                requestID: request.requestID,
+                deviceID: request.deviceID,
+                threadID: request.threadID,
+                title: request.title
+            )
+        )
+    }
+
     func resumeThread(request: ResumeThreadRequestData) async throws {
         let payload = LiveResumeThreadMessage(
             kind: "resume_thread",

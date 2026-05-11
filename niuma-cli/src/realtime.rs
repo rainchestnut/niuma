@@ -80,6 +80,14 @@ struct ThreadArchiveRequest {
     thread_id: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct ThreadRenameRequest {
+    request_id: String,
+    device_id: String,
+    thread_id: String,
+    title: String,
+}
+
 #[derive(Debug, Serialize)]
 struct PairHandshakeAck {
     kind: &'static str,
@@ -346,6 +354,16 @@ where
         "thread_archive_request" => {
             let inbound: ThreadArchiveRequest = serde_json::from_value(value)?;
             handle_thread_archive_request(
+                writer,
+                codex_app_server.as_ref(),
+                active_threads,
+                inbound,
+            )
+            .await?;
+        }
+        "thread_rename_request" => {
+            let inbound: ThreadRenameRequest = serde_json::from_value(value)?;
+            handle_thread_rename_request(
                 writer,
                 codex_app_server.as_ref(),
                 active_threads,
@@ -736,6 +754,82 @@ fn thread_archive_failed_wire(inbound: &ThreadArchiveRequest, error: &str) -> Va
     })
 }
 
+async fn handle_thread_rename_request<S, E>(
+    writer: &mut S,
+    app_server: Option<&CodexAppServerClient>,
+    active_threads: Arc<RwLock<HashMap<String, ActiveThread>>>,
+    inbound: ThreadRenameRequest,
+) -> Result<()>
+where
+    S: Sink<Message, Error = E> + Unpin,
+    E: std::error::Error + Send + Sync + 'static,
+{
+    let result = rename_thread_payload(app_server, active_threads, &inbound).await;
+    match result {
+        Ok(messages) => {
+            for message in messages {
+                send_wire_message(writer, message).await?;
+            }
+        }
+        Err(err) => {
+            warn!(
+                "thread_rename_request failed thread_id={} request_id={}: {err:#}",
+                inbound.thread_id, inbound.request_id
+            );
+            send_wire_message(
+                writer,
+                thread_rename_failed_wire(&inbound, &err.to_string()),
+            )
+            .await?;
+        }
+    }
+    Ok(())
+}
+
+/// Updates the source Codex thread title and returns the acknowledgement plus
+/// a fresh metadata projection from Codex.
+async fn rename_thread_payload(
+    app_server: Option<&CodexAppServerClient>,
+    active_threads: Arc<RwLock<HashMap<String, ActiveThread>>>,
+    inbound: &ThreadRenameRequest,
+) -> Result<Vec<Value>> {
+    let app_server = app_server.context("codex app-server is unavailable")?;
+    let title = inbound.title.trim();
+    if title.is_empty() {
+        anyhow::bail!("thread title cannot be empty");
+    }
+    app_server
+        .set_thread_name(&inbound.thread_id, title)
+        .await?;
+    let mut messages = vec![thread_rename_result_wire(inbound)];
+    messages.extend(
+        metadata_syncs_for_thread_id(Some(app_server), active_threads, &inbound.thread_id, None)
+            .await?,
+    );
+    Ok(messages)
+}
+
+/// Builds the plain acknowledgement for a successful mobile rename request.
+fn thread_rename_result_wire(inbound: &ThreadRenameRequest) -> Value {
+    json!({
+        "kind": "thread_rename_result",
+        "device_id": inbound.device_id.clone(),
+        "request_id": inbound.request_id.clone(),
+        "thread_id": inbound.thread_id.clone(),
+    })
+}
+
+/// Builds the plain failure envelope when the title cannot be updated in Codex.
+fn thread_rename_failed_wire(inbound: &ThreadRenameRequest, error: &str) -> Value {
+    json!({
+        "kind": "thread_rename_failed",
+        "device_id": inbound.device_id.clone(),
+        "request_id": inbound.request_id.clone(),
+        "thread_id": inbound.thread_id.clone(),
+        "error": error,
+    })
+}
+
 async fn handle_app_server_notification<S, E>(
     writer: &mut S,
     codex_app_server: Option<CodexAppServerClient>,
@@ -941,6 +1035,12 @@ async fn notification_metadata_syncs(
             .await
         }
         "thread/unarchived" => {
+            let Some(thread_id) = notification_thread_id(notification) else {
+                return Ok(Vec::new());
+            };
+            metadata_syncs_for_thread_id(app_server, active_threads, &thread_id, None).await
+        }
+        "thread/name/updated" => {
             let Some(thread_id) = notification_thread_id(notification) else {
                 return Ok(Vec::new());
             };
@@ -2218,9 +2318,10 @@ mod tests {
     use tokio::sync::RwLock;
 
     use super::{
-        ActiveThread, ApprovalResponseInbound, PendingApproval, ThreadArchiveRequest, agent_ws_url,
-        claim_task_progress_push, handle_approval_response, task_progress_push_marker,
-        thread_archive_failed_wire, thread_archive_result_wire, thread_sync_completed,
+        ActiveThread, ApprovalResponseInbound, PendingApproval, ThreadArchiveRequest,
+        ThreadRenameRequest, agent_ws_url, claim_task_progress_push, handle_approval_response,
+        task_progress_push_marker, thread_archive_failed_wire, thread_archive_result_wire,
+        thread_rename_failed_wire, thread_rename_result_wire, thread_sync_completed,
     };
 
     #[test]
@@ -2368,6 +2469,29 @@ mod tests {
         let failed = thread_archive_failed_wire(&request, "boom");
         assert_eq!(failed["kind"], "thread_archive_failed");
         assert_eq!(failed["request_id"], "archive-1");
+        assert_eq!(failed["device_id"], "ios-device");
+        assert_eq!(failed["thread_id"], "thread-1");
+        assert_eq!(failed["error"], "boom");
+    }
+
+    #[test]
+    fn thread_rename_acknowledgements_preserve_mobile_request_ids() {
+        let request = ThreadRenameRequest {
+            request_id: "rename-1".to_string(),
+            device_id: "ios-device".to_string(),
+            thread_id: "thread-1".to_string(),
+            title: "New title".to_string(),
+        };
+
+        let success = thread_rename_result_wire(&request);
+        assert_eq!(success["kind"], "thread_rename_result");
+        assert_eq!(success["request_id"], "rename-1");
+        assert_eq!(success["device_id"], "ios-device");
+        assert_eq!(success["thread_id"], "thread-1");
+
+        let failed = thread_rename_failed_wire(&request, "boom");
+        assert_eq!(failed["kind"], "thread_rename_failed");
+        assert_eq!(failed["request_id"], "rename-1");
         assert_eq!(failed["device_id"], "ios-device");
         assert_eq!(failed["thread_id"], "thread-1");
         assert_eq!(failed["error"], "boom");

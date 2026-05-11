@@ -8,6 +8,8 @@ struct ProjectSessionsView: View {
     @State private var isShowingResetConfirmation = false
     @State private var archiveCandidate: ThreadSummary?
     @State private var isShowingArchiveConfirmation = false
+    @State private var renameCandidate: ThreadSummary?
+    @State private var renameDraftTitle = ""
 
     var body: some View {
         ScrollView {
@@ -75,6 +77,11 @@ struct ProjectSessionsView: View {
                                     project: project,
                                     session: session,
                                     isArchiving: appModel.archivingThreadIDs.contains(session.threadID),
+                                    isRenaming: appModel.renamingThreadIDs.contains(session.threadID),
+                                    onRename: {
+                                        renameDraftTitle = session.title
+                                        renameCandidate = session
+                                    },
                                     onResetHistory: {
                                         resetCandidate = session
                                         isShowingResetConfirmation = true
@@ -96,6 +103,22 @@ struct ProjectSessionsView: View {
         .niumaScreenBackground()
         .navigationTitle(project.projectName)
         .navigationBarTitleDisplayMode(.inline)
+        .sheet(item: $renameCandidate) { session in
+            ThreadRenameSheet(
+                session: session,
+                title: $renameDraftTitle,
+                isSaving: appModel.renamingThreadIDs.contains(session.threadID),
+                onCancel: {
+                    renameCandidate = nil
+                },
+                onSave: { title in
+                    Task {
+                        await appModel.renameThread(session, title: title)
+                        renameCandidate = nil
+                    }
+                }
+            )
+        }
         .alert(
             L10n.string("session.reset.confirm.title", language: appModel.appLanguage),
             isPresented: $isShowingResetConfirmation
@@ -137,10 +160,13 @@ private struct SessionRow: View {
     let project: ProjectSummary
     let session: ThreadSummary
     let isArchiving: Bool
+    let isRenaming: Bool
+    let onRename: () -> Void
     let onResetHistory: () -> Void
     let onArchive: () -> Void
 
     var body: some View {
+        let isBusy = isArchiving || isRenaming
         HStack(alignment: .top, spacing: 10) {
             NavigationLink {
                 ThreadView(project: project, session: session)
@@ -151,6 +177,14 @@ private struct SessionRow: View {
             .accessibilityIdentifier("project-session-row")
 
             Menu {
+                Button {
+                    onRename()
+                } label: {
+                    Label(
+                        L10n.string("session.rename.action", language: appModel.appLanguage),
+                        systemImage: "pencil"
+                    )
+                }
                 Button {
                     onResetHistory()
                 } label: {
@@ -169,7 +203,7 @@ private struct SessionRow: View {
                 }
             } label: {
                 Group {
-                    if isArchiving {
+                    if isBusy {
                         ProgressView()
                             .tint(NiumaPalette.mutedInk)
                     } else {
@@ -182,7 +216,7 @@ private struct SessionRow: View {
                 .background(Circle().fill(NiumaPalette.neutralSoft))
             }
             .buttonStyle(.plain)
-            .disabled(isArchiving)
+            .disabled(isBusy)
             .accessibilityLabel(L10n.string("session.actions.accessibility", language: appModel.appLanguage))
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -237,6 +271,73 @@ private struct SessionRowContent: View {
             language: appModel.appLanguage,
             count
         )
+    }
+}
+
+private struct ThreadRenameSheet: View {
+    @Environment(AppModel.self) private var appModel
+    @Environment(\.dismiss) private var dismiss
+
+    let session: ThreadSummary
+    @Binding var title: String
+    let isSaving: Bool
+    let onCancel: () -> Void
+    let onSave: (String) -> Void
+
+    private let maxTitleLength = 80
+
+    private var trimmedTitle: String {
+        title.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private var canSave: Bool {
+        !trimmedTitle.isEmpty && trimmedTitle != session.title && !isSaving
+    }
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section {
+                    TextField(
+                        L10n.string("session.rename.placeholder", language: appModel.appLanguage),
+                        text: $title
+                    )
+                    .textInputAutocapitalization(.sentences)
+                    .disabled(isSaving)
+                    .onChange(of: title) { _, newValue in
+                        if newValue.count > maxTitleLength {
+                            title = String(newValue.prefix(maxTitleLength))
+                        }
+                    }
+                } footer: {
+                    Text(L10n.string("session.rename.message", language: appModel.appLanguage))
+                }
+            }
+            .navigationTitle(L10n.string("session.rename.title", language: appModel.appLanguage))
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button(L10n.string("common.cancel", language: appModel.appLanguage)) {
+                        onCancel()
+                        dismiss()
+                    }
+                    .disabled(isSaving)
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button {
+                        onSave(trimmedTitle)
+                    } label: {
+                        if isSaving {
+                            ProgressView()
+                        } else {
+                            Text(L10n.string("common.save", language: appModel.appLanguage))
+                        }
+                    }
+                    .disabled(!canSave)
+                }
+            }
+        }
+        .presentationDetents([.height(220)])
     }
 }
 

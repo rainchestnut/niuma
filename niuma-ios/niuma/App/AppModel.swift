@@ -23,6 +23,7 @@ final class AppModel {
     var localAttachments: [String: LocalAttachmentPayload] = [:]
     var branchChangesByThread: [String: BranchChangesResult] = [:]
     var archivingThreadIDs: Set<String> = []
+    var renamingThreadIDs: Set<String> = []
     var availableModels: [String] = []
     var selectedModelID: String?
     var selectedReasoningEffort: ReasoningEffort

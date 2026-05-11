@@ -69,6 +69,11 @@ protocol NiumaControlling: AnyObject {
     ///   - request: Thread id and request id used to route the archive result.
     func requestThreadArchive(request: ThreadArchiveRequestData) async throws
 
+    /// Requests that the desktop gateway updates one Codex thread title.
+    /// - Parameters:
+    ///   - request: Thread id, title, and request id used to route the rename result.
+    func requestThreadRename(request: ThreadRenameRequestData) async throws
+
     /// Sends a user task-start request to the paired desktop agent.
     /// - Parameters:
     ///   - request: `TaskStartRequestData` containing routing ids, payload ciphertext, and mobile signature.

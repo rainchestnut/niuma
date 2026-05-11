@@ -441,7 +441,20 @@ Niuma 统一投影：
 | `archived` | request | boolean | 否 | 是否查询已归档 thread |
 | `threads` | response | array | 是 | thread 列表 |
 
-### 7.7 `turn/start`
+### 7.7 `thread/name/set`
+
+| 字段 | 方向 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- | --- |
+| `threadId` | request | string | 是 | 要改名的 Codex thread ID |
+| `threadName` | request | string | 是 | trim 后非空的用户标题 |
+
+说明：
+
+- Gateway 只通过该 app-server 方法修改标题，不维护移动端专属 alias。
+- Codex 发出 `thread/name/updated` 通知时，Gateway 需重新读取该 thread metadata 并发送
+  `thread_sync`，保证移动端列表标题来自 Codex 原数据。
+
+### 7.8 `turn/start`
 
 | 字段 | 方向 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- | --- |
@@ -626,6 +639,20 @@ Gateway 至少需要处理：
 | `thread_id` | string | 是 | thread ID |
 | `cursor` | integer | 是 | 移动端已同步到的消息游标 |
 | `checkpoint` | string | 否 | 辅助恢复点 |
+
+### 8.11 入站消息 `thread_rename_request`
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `request_id` | string | 是 | 移动端请求 ID |
+| `device_id` | string | 是 | 目标移动设备 |
+| `thread_id` | string | 是 | Codex thread ID |
+| `title` | string | 是 | 目标标题 |
+
+说明：
+
+- Gateway 调用 `thread/name/set`，成功后发送 `thread_rename_result` 和最新 `thread_sync`。
+- 失败时发送 `thread_rename_failed`，不修改本地 metadata 缓存。
 
 ---
 

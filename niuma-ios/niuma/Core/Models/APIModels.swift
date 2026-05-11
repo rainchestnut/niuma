@@ -181,6 +181,20 @@ struct ThreadArchiveRequestData: Encodable {
     }
 }
 
+struct ThreadRenameRequestData: Encodable {
+    let requestID: String
+    let deviceID: String
+    let threadID: String
+    let title: String
+
+    enum CodingKeys: String, CodingKey {
+        case requestID = "request_id"
+        case deviceID = "device_id"
+        case threadID = "thread_id"
+        case title
+    }
+}
+
 struct ResumeThreadRequestData: Encodable {
     let threadID: String
     let cursor: Int
