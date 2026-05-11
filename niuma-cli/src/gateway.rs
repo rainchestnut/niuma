@@ -26,7 +26,7 @@ use crate::identity::AgentIdentity;
 use crate::pairing::{self, PairingMaterial, PairingPayload, PairingRuntimeState};
 use crate::paths;
 use crate::realtime::{self, AgentChannelStatus};
-use crate::server::{NiumaServerClient, is_unauthorized_response};
+use crate::server::{NiumaServerClient, is_not_found_response, is_unauthorized_response};
 
 #[derive(Clone)]
 struct GatewayState {
@@ -324,23 +324,29 @@ async fn delete_pairing(
         )
     })?;
     let token = session_token.read().await.clone();
-    let revoke = server
+    let server_revoked = match server
         .revoke_pair_binding(&binding.binding_id, &binding.agent_id, &token)
         .await
-        .map_err(|err| api_error(StatusCode::BAD_GATEWAY, err.to_string()))?;
-    if revoke.binding_id != binding.binding_id {
-        return Err(api_error(
-            StatusCode::BAD_GATEWAY,
-            "server returned a mismatched binding id".to_string(),
-        ));
-    }
+    {
+        Ok(revoke) => {
+            if revoke.binding_id != binding.binding_id {
+                return Err(api_error(
+                    StatusCode::BAD_GATEWAY,
+                    "server returned a mismatched binding id".to_string(),
+                ));
+            }
+            revoke.revoked
+        }
+        Err(err) if is_not_found_response(&err) => false,
+        Err(err) => return Err(api_error(StatusCode::BAD_GATEWAY, err.to_string())),
+    };
     let removed = bindings::delete_binding(&binding.binding_id)
         .map_err(|err| api_error(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()))?
         .is_some();
     Ok(Json(PairingDeleteResponse {
-        binding_id: revoke.binding_id,
+        binding_id: binding.binding_id,
         device_id: binding.device_id,
-        server_revoked: revoke.revoked,
+        server_revoked,
         local_removed: removed,
     }))
 }
@@ -744,6 +750,60 @@ mod tests {
         assert_eq!(body["binding_id"], "binding-delete");
         assert_eq!(body["device_id"], "ios-delete");
         assert_eq!(body["server_revoked"], true);
+        assert_eq!(body["local_removed"], true);
+        assert!(bindings::list_bindings().expect("list bindings").is_empty());
+
+        dashboard_task.abort();
+        revoke_task.abort();
+        let _ = std::fs::remove_dir_all(home);
+    }
+
+    #[tokio::test]
+    async fn delete_pairing_removes_stale_local_binding_when_server_missing() {
+        let home = temp_home("delete-stale-pairing");
+        let _home = HomeOverride::new(&home);
+        bindings::save_binding(PairedDeviceBinding {
+            binding_id: "stale-binding".to_string(),
+            device_id: "ios-stale".to_string(),
+            agent_id: "agent_test".to_string(),
+            ios_encryption_public_key: "x25519:test".to_string(),
+            paired_at: 1_700_000_002,
+        })
+        .expect("seed stale local binding");
+
+        let revoke_listener = TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("revoke listener");
+        let revoke_addr = revoke_listener.local_addr().expect("revoke addr");
+        let revoke_task = tokio::spawn(async move {
+            let app = Router::new().route(
+                "/pair-bindings/{binding_id}",
+                delete(|| async {
+                    (
+                        StatusCode::NOT_FOUND,
+                        Json(json!({ "detail": "pair binding not found" })),
+                    )
+                        .into_response()
+                }),
+            );
+            axum::serve(revoke_listener, app)
+                .await
+                .expect("revoke server");
+        });
+        let state = test_state_with_server(&format!("http://{revoke_addr}"), "session-token");
+        let (dashboard_url, dashboard_task) = spawn_dashboard_with_state(state).await;
+
+        let response = reqwest::Client::new()
+            .delete(format!("{dashboard_url}/api/pairings/stale-binding"))
+            .send()
+            .await
+            .expect("delete request");
+
+        assert!(response.status().is_success());
+        let body: serde_json::Value = response.json().await.expect("json response");
+        assert_eq!(body["binding_id"], "stale-binding");
+        assert_eq!(body["device_id"], "ios-stale");
+        assert_eq!(body["server_revoked"], false);
         assert_eq!(body["local_removed"], true);
         assert!(bindings::list_bindings().expect("list bindings").is_empty());
 

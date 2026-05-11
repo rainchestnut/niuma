@@ -116,6 +116,31 @@
       </section>
     </div>
   </main>
+  <dialog id="confirm-dialog" class="confirm-dialog" aria-labelledby="confirm-title">
+    <form method="dialog" class="confirm-content">
+      <div class="confirm-mark" aria-hidden="true">
+        <svg viewBox="0 0 24 24" focusable="false">
+          <path d="M3 6h18" />
+          <path d="M8 6V4h8v2" />
+          <path d="M19 6l-1 14H6L5 6" />
+          <path d="M10 11v5" />
+          <path d="M14 11v5" />
+        </svg>
+      </div>
+      <div class="confirm-body">
+        <h2 id="confirm-title">删除配对设备</h2>
+        <p>将先撤销服务端绑定，再移除本地记录。服务端已不存在的陈旧记录会直接从本地清理。</p>
+        <dl class="confirm-meta">
+          <div><dt>设备</dt><dd id="confirm-device" class="mono">-</dd></div>
+          <div><dt>Binding ID</dt><dd id="confirm-binding" class="mono">-</dd></div>
+        </dl>
+        <div class="confirm-actions">
+          <button value="cancel">取消</button>
+          <button value="confirm" class="danger-confirm">删除</button>
+        </div>
+      </div>
+    </form>
+  </dialog>
   <script src="/static/dashboard.js"></script>
 </body>
 </html>

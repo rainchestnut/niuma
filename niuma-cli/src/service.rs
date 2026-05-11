@@ -2,6 +2,7 @@
 
 use std::path::Path;
 use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 
@@ -55,16 +56,15 @@ pub async fn start() -> Result<()> {
 /// Stop the installed LaunchAgent if it is loaded.
 pub async fn stop() -> Result<()> {
     if launchd_loaded()? {
-        let _ = run_launchctl([
-            "bootout".to_string(),
-            launchd_domain()?,
-            paths::LAUNCH_AGENT_LABEL.to_string(),
-        ]);
+        run_launchctl(["bootout".to_string(), launchd_service_target()?])?;
+        wait_for_launchd_unloaded().await?;
+        wait_for_gateway_port_free().await?;
         println!("stopped {}", paths::LAUNCH_AGENT_LABEL);
     }
     Ok(())
 }
 
+/// Restart the LaunchAgent and wait for the old gateway process to leave the port.
 pub async fn restart() -> Result<()> {
     stop().await?;
     start().await
@@ -87,10 +87,7 @@ pub async fn print_status() -> Result<()> {
     println!("launchd_label={}", paths::LAUNCH_AGENT_LABEL);
     println!("launchd_loaded={loaded}");
     if loaded {
-        if let Ok(output) = launchctl_output([
-            "print".to_string(),
-            format!("{}/{}", launchd_domain()?, paths::LAUNCH_AGENT_LABEL),
-        ]) {
+        if let Ok(output) = launchctl_output(["print".to_string(), launchd_service_target()?]) {
             for line in output.lines().take(12) {
                 println!("launchd: {line}");
             }
@@ -196,11 +193,7 @@ fn port_owner(port: u16) -> Option<String> {
 }
 
 fn launchd_loaded() -> Result<bool> {
-    Ok(launchctl_output([
-        "print".to_string(),
-        format!("{}/{}", launchd_domain()?, paths::LAUNCH_AGENT_LABEL),
-    ])
-    .is_ok())
+    Ok(launchctl_output(["print".to_string(), launchd_service_target()?]).is_ok())
 }
 
 fn run_launchctl<I>(args: I) -> Result<()>
@@ -253,6 +246,44 @@ fn launchd_domain() -> Result<String> {
     }
     let uid = String::from_utf8_lossy(&output.stdout).trim().to_string();
     Ok(format!("gui/{uid}"))
+}
+
+/// Return the launchctl service-target form required by commands such as bootout.
+fn launchd_service_target() -> Result<String> {
+    Ok(format!(
+        "{}/{}",
+        launchd_domain()?,
+        paths::LAUNCH_AGENT_LABEL
+    ))
+}
+
+/// Wait until launchd no longer reports the LaunchAgent as loaded.
+async fn wait_for_launchd_unloaded() -> Result<()> {
+    let started = Instant::now();
+    while launchd_loaded()? {
+        if started.elapsed() >= Duration::from_secs(10) {
+            anyhow::bail!(
+                "timed out waiting for {} to unload",
+                paths::LAUNCH_AGENT_LABEL
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    Ok(())
+}
+
+/// Wait until the dashboard port is free after launchd stops the old gateway.
+async fn wait_for_gateway_port_free() -> Result<()> {
+    let started = Instant::now();
+    loop {
+        match ensure_gateway_port_free().await {
+            Ok(()) => return Ok(()),
+            Err(_) if started.elapsed() < Duration::from_secs(10) => {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            Err(err) => return Err(err),
+        }
+    }
 }
 
 fn xml_escape(value: &str) -> String {

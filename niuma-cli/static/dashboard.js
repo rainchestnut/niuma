@@ -2,6 +2,9 @@ const serverInput = document.getElementById("server-url");
 const configMessage = document.getElementById("config-message");
 const pairingMessage = document.getElementById("pairing-message");
 const pairingsElement = document.getElementById("pairings");
+const confirmDialog = document.getElementById("confirm-dialog");
+const confirmDevice = document.getElementById("confirm-device");
+const confirmBinding = document.getElementById("confirm-binding");
 
 async function fetchText(path, options = {}) {
   const response = await fetch(path, { cache: "no-store", ...options });
@@ -105,10 +108,21 @@ function renderPairings(devices) {
       <div class="pairing-binding mono">${escapeHTML(device.binding_id)}</div>
       <div class="pairing-time">${formatTime(device.paired_at)}</div>
       <button
-        class="danger"
+        class="icon-button danger-icon"
         data-delete-pairing="${escapeHTML(device.binding_id)}"
         data-device-id="${escapeHTML(device.device_id)}"
-      >删除</button>
+        aria-label="删除 ${escapeHTML(device.binding_id)}"
+        title="删除配对"
+      >
+        <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+          <path d="M3 6h18"></path>
+          <path d="M8 6V4h8v2"></path>
+          <path d="M19 6l-1 14H6L5 6"></path>
+          <path d="M10 11v5"></path>
+          <path d="M14 11v5"></path>
+        </svg>
+        <span class="sr-only">删除</span>
+      </button>
     </div>
   `).join("");
 }
@@ -150,11 +164,28 @@ async function withButton(button, task) {
   }
 }
 
+function confirmDeletePairing(deviceID, bindingID) {
+  if (!confirmDialog?.showModal) {
+    return Promise.resolve(window.confirm(`删除 ${deviceID} 的配对绑定？`));
+  }
+  confirmDevice.textContent = deviceID || "-";
+  confirmBinding.textContent = bindingID || "-";
+  return new Promise((resolve) => {
+    const settle = () => {
+      confirmDialog.removeEventListener("close", settle);
+      resolve(confirmDialog.returnValue === "confirm");
+    };
+    confirmDialog.returnValue = "";
+    confirmDialog.addEventListener("close", settle);
+    confirmDialog.showModal();
+  });
+}
+
 async function deletePairing(button) {
   const bindingID = button.dataset.deletePairing;
   const deviceID = button.dataset.deviceId;
   if (!bindingID) return;
-  const confirmed = window.confirm(`删除 ${deviceID} 的配对绑定？`);
+  const confirmed = await confirmDeletePairing(deviceID, bindingID);
   if (!confirmed) return;
   await withButton(button, async () => {
     setPairingNotice("正在撤销服务端绑定...");

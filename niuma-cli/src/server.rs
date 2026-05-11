@@ -416,11 +416,21 @@ pub fn is_unauthorized_response(error: &anyhow::Error) -> bool {
     })
 }
 
+pub fn is_not_found_response(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause
+            .downcast_ref::<HttpStatusError>()
+            .is_some_and(|http_error| http_error.status == StatusCode::NOT_FOUND)
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use reqwest::StatusCode;
 
-    use super::{HttpStatusError, NiumaServerClient, is_unauthorized_response};
+    use super::{
+        HttpStatusError, NiumaServerClient, is_not_found_response, is_unauthorized_response,
+    };
 
     #[test]
     fn server_client_treats_proxy_prefix_without_slash_as_directory() {
@@ -458,5 +468,17 @@ mod tests {
         .context("pair token refresh failed");
 
         assert!(is_unauthorized_response(&error));
+    }
+
+    #[test]
+    fn not_found_status_errors_are_detected_through_context() {
+        let error = anyhow::Error::new(HttpStatusError {
+            operation: "DELETE /pair-bindings/{binding_id}",
+            status: StatusCode::NOT_FOUND,
+            detail: Some("pair binding not found".to_string()),
+        })
+        .context("delete pairing failed");
+
+        assert!(is_not_found_response(&error));
     }
 }
