@@ -204,27 +204,22 @@ struct HomeView: View {
             if appModel.conversationSessions.isEmpty {
                 placeholderRow(appModel.localized("home.chats.empty"))
             } else {
-                VStack(spacing: 6) {
-                    ForEach(appModel.conversationSessions) { session in
-                        let sessionProject = appModel.project(for: session.projectID)
-                        NavigationLink {
-                            ThreadView(
-                                project: sessionProject ?? ProjectSummary(
-                                    projectID: session.projectID,
-                                    agentID: session.agentID,
-                                    projectName: appModel.localized("project.none"),
-                                    updatedAt: session.updatedAt
-                                ),
-                                session: session
+                ThreadSessionActionsHost { actions in
+                    VStack(spacing: 6) {
+                        ForEach(appModel.conversationSessions) { session in
+                            let sessionProject = appModel.project(for: session.projectID) ?? ProjectSummary(
+                                projectID: session.projectID,
+                                agentID: session.agentID,
+                                projectName: appModel.localized("project.none"),
+                                updatedAt: session.updatedAt
                             )
-                        } label: {
-                            RecentSessionRow(
+                            ThreadSessionRow(
+                                project: sessionProject,
                                 session: session,
-                                pendingApprovals: appModel.pendingApprovalCount(for: session.threadID)
+                                actions: actions,
+                                accessibilityIdentifier: "recent-session-row"
                             )
                         }
-                        .buttonStyle(.plain)
-                        .accessibilityIdentifier("recent-session-row")
                     }
                 }
             }
@@ -320,53 +315,6 @@ private struct ProjectRow: View {
                 .foregroundStyle(NiumaPalette.mutedInk)
         }
         .padding(.vertical, 8)
-        .contentShape(Rectangle())
-    }
-}
-
-private struct RecentSessionRow: View {
-    @Environment(AppModel.self) private var appModel
-    let session: ThreadSummary
-    let pendingApprovals: Int
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(alignment: .top, spacing: 12) {
-                VStack(alignment: .leading, spacing: 5) {
-                    Text(session.title)
-                        .font(.system(size: 15, weight: .medium))
-                        .foregroundStyle(NiumaPalette.ink)
-                        .multilineTextAlignment(.leading)
-                    Text(DateFormatting.relativeTimestamp.localizedString(for: session.updatedAt, relativeTo: .now))
-                        .font(.caption2)
-                        .foregroundStyle(NiumaPalette.mutedInk)
-                }
-
-                Spacer()
-
-                Image(systemName: "chevron.right")
-                    .font(.caption.weight(.bold))
-                    .foregroundStyle(NiumaPalette.mutedInk)
-            }
-
-            HStack(spacing: 8) {
-                if pendingApprovals > 0 {
-                    StatusBadge(
-                        title: appModel.localized("approval.pending.count.other", pendingApprovals),
-                        tone: .warning
-                    )
-                }
-                if let statusBadge = session.status.compactBadge(for: appModel.appLanguage) {
-                    StatusBadge(title: statusBadge.0, tone: statusBadge.1)
-                }
-            }
-        }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 14)
-        .background(
-            RoundedRectangle(cornerRadius: 20, style: .continuous)
-                .fill(NiumaPalette.raisedCard)
-        )
         .contentShape(Rectangle())
     }
 }
