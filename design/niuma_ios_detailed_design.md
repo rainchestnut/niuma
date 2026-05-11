@@ -167,6 +167,8 @@
 - 按更新时间排序
 - 支持进入已有 session
 - 支持创建新 session
+- 行操作菜单支持修改 Codex 原 thread 标题、重置本地历史、归档 thread；修改标题必须等待
+  Gateway 回传 `thread_sync` 后刷新列表，不直接覆盖本地缓存。
 
 ### 5.4 线程页
 
@@ -342,6 +344,20 @@
 | `thread_id` | string | 是 | thread ID |
 | `cursor` | integer | 是 | 已连续同步的最大消息游标 |
 | `checkpoint` | string | 否 | 辅助恢复游标 |
+
+### 8.5 WebSocket `thread_rename_request`
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `request_id` | string | 是 | 移动端生成的请求 ID，用于匹配 result/failed |
+| `thread_id` | string | 是 | 要改名的 Codex thread ID |
+| `title` | string | 是 | trim 后非空的目标标题 |
+
+说明：
+
+- 移动端只发起请求并进入提交中状态，不直接修改 SwiftData 标题。
+- 成功以 `thread_rename_result` 结束提交中状态，并等待随后 `thread_sync` 把 Codex 原数据标题写回本地。
+- 失败以 `thread_rename_failed` 结束提交中状态并展示错误。
 
 ### 8.7 WebSocket `task_update`
 

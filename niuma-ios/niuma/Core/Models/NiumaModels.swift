@@ -618,6 +618,13 @@ nonisolated struct ThreadArchiveResult: Hashable {
     let error: String?
 }
 
+nonisolated struct ThreadRenameResult: Hashable {
+    let requestID: String
+    let threadID: String
+    let succeeded: Bool
+    let error: String?
+}
+
 nonisolated struct ApprovalResponseFailure: Hashable {
     let approvalID: String
     let error: String
@@ -634,6 +641,7 @@ nonisolated enum RealtimeEvent: Hashable {
     case metadataRefreshResult(MetadataRefreshResult)
     case branchChangesResult(BranchChangesResult)
     case threadArchiveResult(ThreadArchiveResult)
+    case threadRenameResult(ThreadRenameResult)
     case approvalRequest(ApprovalSummary)
     case approvalResponseFailed(ApprovalResponseFailure)
     case userInputRequest(UserInputRequestSummary)

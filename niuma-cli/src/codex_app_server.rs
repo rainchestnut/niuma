@@ -299,6 +299,19 @@ impl CodexAppServerClient {
         Ok(())
     }
 
+    /// Update the source Codex thread title through app-server.
+    pub async fn set_thread_name(&self, thread_id: &str, thread_name: &str) -> Result<()> {
+        self.request(
+            "thread/name/set",
+            json!({
+                "threadId": thread_id,
+                "threadName": thread_name,
+            }),
+        )
+        .await?;
+        Ok(())
+    }
+
     /// Start a user turn with Codex-native input items.
     pub async fn start_turn_payload(
         &self,

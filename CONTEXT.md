@@ -261,8 +261,11 @@ diff bundle 是版本化 JSON，`version=1`，`source=codex_app_server_file_chan
 `old_line`、`new_line` 和 `content`。解析失败时 `hunks=[]`，移动端回退展示同文件的
 `raw_diff`。diff bundle 不承载分支统计字段。
 既有历史不做全局后台重放，也不对当前 thread 自动发起 `cursor=0` 的全量刷新。移动端
-在线程列表为单个 thread 提供右侧小弹窗操作入口，操作列表当前只包含“重置历史”；
-用户触发后清空 iOS 端该 thread 相关的 SwiftData 历史和同步状态，重新进入详情时继续走
+在线程列表为单个 thread 提供右侧小弹窗操作入口，操作列表包含“修改标题”、“重置历史”和
+“归档”。“修改标题”必须写入 Codex 原 thread title：移动端发送 `thread_rename_request`，
+Server 只认证和路由，Gateway 调 Codex app-server `thread/name/set`，成功后再通过权威
+`thread_sync` 回写移动端 SwiftData；移动端不得只改本地 `StoredThread.title`。用户触发
+“重置历史”后清空 iOS 端该 thread 相关的 SwiftData 历史和同步状态，重新进入详情时继续走
 现有详情刷新逻辑。“重置历史”保留 thread 列表行和 thread metadata，只清空该 thread
 对应的 `StoredThreadEntry`、cursor/checkpoint、内存 timeline/refresh state、transient
 entry，以及只被这些 entry 引用的本地 attachment 文件。删除 thread 时复用同一段本地历史

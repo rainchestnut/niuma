@@ -333,6 +333,20 @@ Transfer API 用于短时中转媒体和文件。当前实现用 `X-Session-Toke
 | `cursor` | integer | 是 | 移动端已同步到的消息游标 |
 | `checkpoint` | string | 否 | 补充检查点 |
 
+#### `thread_rename_request`
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `request_id` | string | 是 | 移动端请求 ID |
+| `thread_id` | string | 是 | Codex thread ID |
+| `title` | string | 是 | 目标标题 |
+
+说明：
+
+- Server 不保存标题、不修改 metadata，只把请求路由给已配对 Gateway。
+- Gateway 离线时 Server 立即回 `thread_rename_failed`，错误为 `desktop agent is offline`。
+- Gateway 成功后应回 `thread_rename_result` 并发送新的 `thread_sync`。
+
 ### 7.5 出站消息字段
 
 #### `task_update`
