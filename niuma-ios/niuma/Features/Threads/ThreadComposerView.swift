@@ -6,6 +6,7 @@ struct ThreadComposerBar: View {
     @Binding var prompt: String
     @State private var speechTranscriber = ComposerSpeechTranscriber()
     @State private var isAttachmentPanelExpanded = false
+    @State private var isIntelligencePickerExpanded = false
 
     let placeholder: String
     let attachments: [OutgoingAttachment]
@@ -18,6 +19,7 @@ struct ThreadComposerBar: View {
     let onSend: () -> Void
 
     private let reasoningEfforts: [ReasoningEffort] = [.low, .medium, .high, .xhigh]
+    private let intelligencePillMaximumWidth: CGFloat = 158
     private let permissionPresets: [ApprovalPermissionPreset] = [
         .defaultPermissions,
         .autoReview,
@@ -35,12 +37,28 @@ struct ThreadComposerBar: View {
 
     var body: some View {
         VStack(spacing: 0) {
+            if isIntelligencePickerExpanded {
+                IntelligencePickerPanel(
+                    reasoningEfforts: reasoningEfforts,
+                    availableModels: appModel.availableModels,
+                    selectedModelID: appModel.selectedModelID,
+                    selectedReasoningEffort: appModel.selectedReasoningEffort,
+                    modelSectionTitle: appModel.localized("model.placeholder"),
+                    onSelectEffort: selectReasoningEffort,
+                    onSelectModel: selectModel
+                )
+                .padding(.horizontal, 12)
+                .padding(.bottom, 8)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .transition(.move(edge: .bottom).combined(with: .opacity))
+            }
+
             VStack(spacing: 8) {
                 HStack(spacing: 8) {
                     if let currentBranch {
                         ComposerBranchPill(branch: currentBranch)
                     }
-                    intelligenceMenu
+                    intelligencePickerButton
                     permissionMenu
                     Spacer()
                 }
@@ -86,6 +104,7 @@ struct ThreadComposerBar: View {
                             .padding(.vertical, 3)
                             .contentShape(Rectangle())
                             .onTapGesture {
+                                closeIntelligencePicker()
                                 closeAttachmentPanel()
                                 isPromptFocused.wrappedValue = true
                             }
@@ -182,6 +201,7 @@ struct ThreadComposerBar: View {
     private func send() {
         guard canSend else { return }
         closeAttachmentPanel()
+        closeIntelligencePicker()
         speechTranscriber.stop()
         isPromptFocused.wrappedValue = false
         onSend()
@@ -189,6 +209,7 @@ struct ThreadComposerBar: View {
 
     private func toggleAttachmentPanel() {
         guard !isSending else { return }
+        closeIntelligencePicker()
         isPromptFocused.wrappedValue = false
         withAnimation(.easeInOut(duration: 0.18)) {
             isAttachmentPanelExpanded.toggle()
@@ -202,51 +223,53 @@ struct ThreadComposerBar: View {
         }
     }
 
+    private func toggleIntelligencePicker() {
+        guard !isSending else { return }
+        closeAttachmentPanel()
+        isPromptFocused.wrappedValue = false
+        withAnimation(.easeInOut(duration: 0.18)) {
+            isIntelligencePickerExpanded.toggle()
+        }
+    }
+
+    private func closeIntelligencePicker() {
+        guard isIntelligencePickerExpanded else { return }
+        withAnimation(.easeInOut(duration: 0.18)) {
+            isIntelligencePickerExpanded = false
+        }
+    }
+
+    private func selectReasoningEffort(_ effort: ReasoningEffort) {
+        appModel.selectReasoningEffort(effort)
+        closeIntelligencePicker()
+    }
+
+    private func selectModel(_ modelID: String) {
+        appModel.selectModel(modelID)
+        closeIntelligencePicker()
+    }
+
     private func openPhotoPicker() {
         closeAttachmentPanel()
+        closeIntelligencePicker()
         onPickPhotoOrVideo()
     }
 
     private func openFilePicker() {
         closeAttachmentPanel()
+        closeIntelligencePicker()
         onPickFile()
     }
 
-    private var intelligenceMenu: some View {
-        Menu {
-            ForEach(reasoningEfforts) { effort in
-                Button {
-                    appModel.selectReasoningEffort(effort)
-                } label: {
-                    menuLabel(
-                        title: effort.rawValue,
-                        isSelected: appModel.selectedReasoningEffort == effort
-                    )
-                }
-            }
-
-            if !appModel.availableModels.isEmpty {
-                Divider()
-
-                Section(appModel.localized("model.placeholder")) {
-                    ForEach(appModel.availableModels, id: \.self) { modelID in
-                        Button {
-                            appModel.selectModel(modelID)
-                        } label: {
-                            menuLabel(
-                                title: modelID,
-                                isSelected: appModel.selectedModelID == modelID
-                            )
-                        }
-                    }
-                }
-            }
+    private var intelligencePickerButton: some View {
+        Button {
+            toggleIntelligencePicker()
         } label: {
-            ComposerPill(title: intelligencePillTitle, maxWidth: 158)
+            ComposerPill(title: intelligencePillTitle, maximumWidth: intelligencePillMaximumWidth)
         }
         .buttonStyle(.plain)
         .accessibilityLabel(appModel.localized("thread.intelligence.accessibility"))
-        .accessibilityIdentifier("thread-intelligence-menu")
+        .accessibilityIdentifier("thread-intelligence-picker")
     }
 
     private var intelligencePillTitle: String {
@@ -378,6 +401,87 @@ struct ThreadComposerBar: View {
     }
 }
 
+/// Pure SwiftUI selector for model and reasoning effort, avoiding UIKit menu reparenting inside hosting views.
+private struct IntelligencePickerPanel: View {
+    let reasoningEfforts: [ReasoningEffort]
+    let availableModels: [String]
+    let selectedModelID: String?
+    let selectedReasoningEffort: ReasoningEffort
+    let modelSectionTitle: String
+    let onSelectEffort: (ReasoningEffort) -> Void
+    let onSelectModel: (String) -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            ForEach(reasoningEfforts) { effort in
+                pickerRow(
+                    title: effort.rawValue,
+                    isSelected: effort == selectedReasoningEffort,
+                    action: {
+                        onSelectEffort(effort)
+                    }
+                )
+                .accessibilityIdentifier("thread-reasoning-effort-\(effort.rawValue)")
+            }
+
+            if !availableModels.isEmpty {
+                Divider()
+                    .padding(.vertical, 4)
+
+                Text(modelSectionTitle)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(NiumaPalette.mutedInk)
+                    .padding(.horizontal, 12)
+                    .padding(.bottom, 2)
+
+                ForEach(availableModels, id: \.self) { modelID in
+                    pickerRow(
+                        title: modelID,
+                        isSelected: modelID == selectedModelID,
+                        action: {
+                            onSelectModel(modelID)
+                        }
+                    )
+                    .accessibilityIdentifier("thread-model-\(modelID)")
+                }
+            }
+        }
+        .padding(8)
+        .frame(maxWidth: 360, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 20, style: .continuous)
+                .fill(NiumaPalette.card.opacity(0.96))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 20, style: .continuous)
+                .stroke(NiumaPalette.border, lineWidth: 1)
+        )
+        .shadow(color: .black.opacity(0.12), radius: 18, x: 0, y: 10)
+    }
+
+    private func pickerRow(title: String, isSelected: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(spacing: 12) {
+                Text(title)
+                    .font(.callout.weight(isSelected ? .semibold : .regular))
+                    .foregroundStyle(NiumaPalette.ink)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Spacer(minLength: 16)
+                if isSelected {
+                    Image(systemName: "checkmark")
+                        .font(.callout.weight(.semibold))
+                        .foregroundStyle(NiumaPalette.mutedInk)
+                }
+            }
+            .padding(.horizontal, 12)
+            .frame(height: 38)
+            .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        }
+        .buttonStyle(.plain)
+    }
+}
+
 /// WeChat-style attachment tray with only the two currently supported attachment sources.
 private struct ComposerAttachmentPanel: View {
     let photoTitle: String
@@ -501,7 +605,7 @@ struct ThreadBottomFade: View {
 
 struct ComposerPill: View {
     let title: String
-    var maxWidth: CGFloat?
+    var maximumWidth: CGFloat? = nil
 
     var body: some View {
         Text(title)
@@ -511,7 +615,8 @@ struct ComposerPill: View {
             .truncationMode(.middle)
             .padding(.horizontal, 10)
             .padding(.vertical, 6)
-            .frame(maxWidth: maxWidth, alignment: .leading)
+            .frame(maxWidth: maximumWidth, alignment: .leading)
+            .fixedSize(horizontal: true, vertical: false)
             .background(Capsule().fill(NiumaPalette.raisedCard))
     }
 }
