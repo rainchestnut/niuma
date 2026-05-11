@@ -518,7 +518,7 @@ mod tests {
     }
 
     #[test]
-    fn final_file_changes_become_one_summary_before_final_answer() {
+    fn final_file_changes_become_one_summary_after_final_answer() {
         let entries = extract_turn_entries(
             &json!({
                 "id": "turn-1",
@@ -547,20 +547,20 @@ mod tests {
         );
 
         assert_eq!(entries.len(), 2);
-        assert_eq!(entries[0].item_type, "fileChange");
+        assert_eq!(entries[0].phase.as_deref(), Some("final_answer"));
+        assert_eq!(entries[1].item_type, "fileChange");
         assert_eq!(
-            entries[0].phase.as_deref(),
+            entries[1].phase.as_deref(),
             Some("final_answer_file_change")
         );
         let payload: Value =
-            serde_json::from_str(&entries[0].text).expect("JSON content-parts payload");
+            serde_json::from_str(&entries[1].text).expect("JSON content-parts payload");
         let summary = &payload["content_parts"][0];
         assert_eq!(summary["type"], "file_change_summary");
         assert_eq!(summary["files"], 1);
         assert_eq!(summary["additions"], 2);
         assert_eq!(summary["deletions"], 1);
         assert_eq!(summary["files_summary"][0]["path"], "design/a.md");
-        assert_eq!(entries[1].phase.as_deref(), Some("final_answer"));
     }
 
     #[test]

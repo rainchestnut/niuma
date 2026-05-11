@@ -156,18 +156,31 @@ pub(crate) fn extract_turn_entries(turn: &Value, cwd: Option<&str>) -> Vec<Threa
         .unwrap_or_default();
     let final_file_change_summary = final_file_change_summary(&items);
     for (item_index, item) in items.iter().enumerate() {
+        if final_file_change_summary
+            .as_ref()
+            .is_some_and(|summary| summary.completed_indices.contains(&item_index))
+        {
+            continue;
+        }
+        let text = item_mobile_ciphertext(item);
+        if text.is_empty() {
+            continue;
+        }
+        let role = item_role(item);
+        let offset = entries.len();
+        let entry_id = item_entry_id(item, &turn_id, offset);
+        entries.push(ThreadEntry {
+            entry_id: entry_id.clone(),
+            role,
+            text,
+            item_type: item_type(item),
+            phase: item_phase(item),
+        });
         if let Some(summary) = final_file_change_summary.as_ref() {
-            if item_index == summary.insert_index {
-                if let Some(part) = diff_summary::file_change_summary_part(
-                    &turn_id,
-                    &final_answer_entry_id(
-                        &items[summary.final_index],
-                        &turn_id,
-                        summary.final_index,
-                    ),
-                    &summary.items,
-                    cwd,
-                ) {
+            if item_index == summary.final_index {
+                if let Some(part) =
+                    diff_summary::file_change_summary_part(&turn_id, &entry_id, &summary.items, cwd)
+                {
                     entries.push(ThreadEntry {
                         entry_id: final_file_change_entry_id(&turn_id, &summary.items),
                         role: "assistant".to_string(),
@@ -177,23 +190,7 @@ pub(crate) fn extract_turn_entries(turn: &Value, cwd: Option<&str>) -> Vec<Threa
                     });
                 }
             }
-            if summary.completed_indices.contains(&item_index) {
-                continue;
-            }
         }
-        let text = item_mobile_ciphertext(item);
-        if text.is_empty() {
-            continue;
-        }
-        let role = item_role(item);
-        let offset = entries.len();
-        entries.push(ThreadEntry {
-            entry_id: item_entry_id(item, &turn_id, offset),
-            role,
-            text,
-            item_type: item_type(item),
-            phase: item_phase(item),
-        });
     }
     if let Some(input_text) = turn_input_text(turn, &entries) {
         if !entries
@@ -291,7 +288,6 @@ pub(crate) fn string_field(payload: &Value, key: &str) -> Option<String> {
 
 struct FinalFileChangeSummary {
     final_index: usize,
-    insert_index: usize,
     completed_indices: Vec<usize>,
     items: Vec<Value>,
 }
@@ -308,14 +304,15 @@ fn final_file_change_summary(items: &[Value]) -> Option<FinalFileChangeSummary> 
         .enumerate()
         .filter_map(|(index, item)| is_completed_file_change(item).then_some(index))
         .collect::<Vec<_>>();
-    let insert_index = *completed_indices.last()?;
+    if completed_indices.is_empty() {
+        return None;
+    }
     let items = completed_indices
         .iter()
         .map(|index| items[*index].clone())
         .collect();
     Some(FinalFileChangeSummary {
         final_index,
-        insert_index,
         completed_indices,
         items,
     })
@@ -332,10 +329,6 @@ fn is_completed_file_change(item: &Value) -> bool {
             .get("changes")
             .and_then(Value::as_array)
             .is_some_and(|changes| !changes.is_empty())
-}
-
-fn final_answer_entry_id(item: &Value, turn_id: &str, item_index: usize) -> String {
-    item_entry_id(item, turn_id, item_index)
 }
 
 fn final_file_change_entry_id(turn_id: &str, items: &[Value]) -> String {
