@@ -296,7 +296,7 @@ private struct FileChangeSummaryCard: View {
                     }
 
                     Spacer(minLength: 0)
-                    Image(systemName: "chevron.up.forward")
+                    Image(systemName: "arrow.up.forward")
                         .font(.caption.weight(.semibold))
                         .foregroundStyle(NiumaPalette.mutedInk)
                 }

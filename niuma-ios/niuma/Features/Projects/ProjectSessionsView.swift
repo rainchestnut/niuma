@@ -484,7 +484,7 @@ private struct BranchChangeSummaryBlock: View {
                     .foregroundStyle(NiumaPalette.mutedInk)
             }
             Spacer()
-            Image(systemName: "chevron.up.forward")
+            Image(systemName: "arrow.up.forward")
                 .font(.caption.weight(.semibold))
                 .foregroundStyle(NiumaPalette.mutedInk)
         }
