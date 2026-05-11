@@ -78,7 +78,7 @@ pub fn list_bindings() -> Result<Vec<PairedDeviceBinding>> {
     let path = bindings_path()?;
     let file = read_bindings(&path)?;
     let mut bindings = file.bindings.values().cloned().collect::<Vec<_>>();
-    bindings.sort_by(|left, right| right.paired_at.cmp(&left.paired_at));
+    bindings.sort_by_key(|binding| std::cmp::Reverse(binding.paired_at));
     Ok(bindings)
 }
 
@@ -99,8 +99,7 @@ fn read_bindings(path: &PathBuf) -> Result<BindingFile> {
     }
     let text = std::fs::read_to_string(path)
         .with_context(|| format!("failed to read {}", path.display()))?;
-    Ok(serde_json::from_str(&text)
-        .with_context(|| format!("failed to parse {}", path.display()))?)
+    serde_json::from_str(&text).with_context(|| format!("failed to parse {}", path.display()))
 }
 
 fn write_bindings(path: &PathBuf, file: &BindingFile) -> Result<()> {

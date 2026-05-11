@@ -194,10 +194,10 @@ fn parse_unified_diff(diff: &str) -> (i64, i64, Vec<Value>) {
             }
             continue;
         }
-        if line.starts_with(' ') {
-            if let Some(hunk) = current.as_mut() {
-                hunk.push_context(line);
-            }
+        if line.starts_with(' ')
+            && let Some(hunk) = current.as_mut()
+        {
+            hunk.push_context(line);
         }
     }
     if let Some(hunk) = current.take().and_then(HunkBuilder::finish) {
@@ -344,10 +344,10 @@ fn files_bundle_value(files: &BTreeMap<String, ParsedFileDiff>) -> Value {
 
 fn display_path(path: &str, cwd: Option<&str>) -> String {
     let trimmed = path.trim();
-    if let Some(cwd) = cwd {
-        if let Ok(relative) = Path::new(trimmed).strip_prefix(Path::new(cwd)) {
-            return relative.to_string_lossy().to_string();
-        }
+    if let Some(cwd) = cwd
+        && let Ok(relative) = Path::new(trimmed).strip_prefix(Path::new(cwd))
+    {
+        return relative.to_string_lossy().to_string();
     }
     trimmed.to_string()
 }
@@ -620,13 +620,11 @@ mod tests {
         assert_eq!(part["additions"], 2);
         assert_eq!(part["deletions"], 1);
         assert_eq!(part["files_summary"][0]["path"], "src/lib.rs");
-        assert_eq!(
-            part["diff_bundle"]["files"][0]["raw_diff"]
+        assert!(
+            !part["diff_bundle"]["files"][0]["raw_diff"]
                 .as_str()
                 .unwrap()
-                .len()
-                > 0,
-            true
+                .is_empty()
         );
     }
 

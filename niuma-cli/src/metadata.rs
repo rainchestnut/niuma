@@ -458,7 +458,7 @@ fn project_id_for_root(root: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(root.as_bytes());
     let digest = hasher.finalize();
-    format!("workspace-{}", hex::encode(digest)[..16].to_string())
+    format!("workspace-{}", &hex::encode(digest)[..16])
 }
 
 fn string_field(payload: &Value, key: &str) -> Option<String> {
