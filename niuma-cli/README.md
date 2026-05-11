@@ -1,38 +1,53 @@
 # Niuma CLI
 
-`niuma-cli` 是 Niuma 的 Rust 桌面 Gateway。crate 目录名是
-`niuma-cli/`，安装后的二进制命令名是 `niuma`。
+[中文说明](README.zh-CN.md)
 
-它负责桌面身份、二维码配对页面、Niuma Server 连接、Codex app-server
-子进程、移动端任务转发、审批/输入请求转发，以及文件 transfer 本地物化。
+`niuma` is the Rust desktop gateway for Niuma. The crate lives in
+`niuma-cli/`, publishes as the `niuma` crate, and installs the `niuma` binary.
 
-## 安装
+The gateway owns desktop identity, the local pairing dashboard, Niuma Server
+registration, Codex app-server process management, mobile task forwarding,
+approval and input request forwarding, and local materialization of file
+transfers.
 
-当前只支持从本仓库本地安装：
+## Role
+
+`niuma` is not an AI agent. It is a desktop connector that lets the Niuma iOS
+app talk to Codex by starting or connecting to `codex app-server`. Install
+Codex.app or the Codex CLI before starting the Niuma gateway.
+
+## Install
+
+1. Install Codex.app or the Codex CLI.
+2. Install the desktop gateway from crates.io:
+
+```bash
+cargo install niuma
+```
+
+From a local checkout, install the same binary with:
 
 ```bash
 cargo install --path niuma-cli
 ```
 
-安装后确认命令可用：
+Verify the installed command:
 
 ```bash
 niuma --help
 niuma --version
 ```
 
-## 命令格式规则
+## Repository Scope
 
-`niuma` 使用 `clap` 解析命令，规则如下：
+`niuma-cli` is one package inside the larger Niuma repository. The repository
+root contains the iOS app, the Rust server, and design documents. This package
+keeps its own README and LICENSE so the crates.io archive is complete on its
+own; the repository root README and LICENSE describe the whole source tree.
 
-- 顶层命令必须带子命令：`niuma <COMMAND>`。
-- 长参数使用两个 ASCII 短横线：`--help`、`--server-url`。
-- 短参数使用一个 ASCII 短横线：`-h`、`-V`。
-- 不支持长破折号或混合破折号，例如 `niuma -—help` 不是合法写法。
-- 子命令的 help 要写在对应层级后面，例如 `niuma gateway --help`。
-- 顶层 `--help` 只显示命令列表；具体参数以子命令 help 为准。
+## Command Shape
 
-顶层命令：
+`niuma` uses `clap` and expects a top-level subcommand:
 
 ```bash
 niuma gateway [OPTIONS]
@@ -41,18 +56,27 @@ niuma status [OPTIONS]
 niuma reset --yes
 ```
 
-## 配置来源
+Rules:
 
-`niuma gateway` 的配置优先级是：
+- Top-level commands must be written as `niuma <COMMAND>`.
+- Long options use two ASCII hyphens, for example `--help` and `--server-url`.
+- Short options use one ASCII hyphen, for example `-h` and `-V`.
+- Help belongs at the active command level, for example `niuma gateway --help`.
+- Top-level `--help` shows the command list; command-specific options are shown
+  by each subcommand.
+
+## Configuration
+
+`niuma gateway` loads configuration in this order:
 
 ```text
-命令行参数 > 环境变量 > ~/.niuma/config.toml > 内置默认值
+command-line options > environment variables > ~/.niuma/config.toml > built-in defaults
 ```
 
-`niuma status` 只读取 dashboard host/port，也遵循同样的参数、环境变量、
-配置文件、默认值顺序。
+`niuma status` only reads the dashboard host and port, but it follows the same
+source order.
 
-支持的配置文件字段：
+Supported `~/.niuma/config.toml` fields:
 
 ```toml
 server_url = "http://127.0.0.1:8000"
@@ -62,7 +86,7 @@ dashboard_port = 8765
 heartbeat_seconds = 30
 ```
 
-支持的环境变量：
+Supported environment variables:
 
 ```bash
 NIUMA_SERVER_URL=http://127.0.0.1:8000
@@ -72,33 +96,34 @@ NIUMA_DASHBOARD_PORT=8765
 NIUMA_HEARTBEAT_SECONDS=30
 ```
 
-默认值：
+Defaults:
 
 - `server_url`: `http://127.0.0.1:8000`
 - `dashboard_host`: `127.0.0.1`
 - `dashboard_port`: `8765`
 - `heartbeat_seconds`: `30`
-- `device_name`: 优先取 `HOSTNAME`，其次取 macOS `scutil --get ComputerName`，
-  最后回退为 `Niuma Desktop`
+- `device_name`: `HOSTNAME`, then macOS `scutil --get ComputerName`, then
+  `Niuma Desktop`
 
 ## `niuma gateway`
 
-前台启动完整桌面 Gateway runtime：
+Run the complete foreground desktop gateway runtime:
 
 ```bash
 niuma gateway
 ```
 
-启动后会：
+Startup behavior:
 
-- 创建或读取 `~/.niuma/identity` 下的桌面身份。
-- 连接 Niuma Server 并注册/auth desktop agent。
-- 启动本地 loopback dashboard，默认地址是 `http://127.0.0.1:8765`。
-- 默认打开本地配对页面。
-- 维护 `/api/pairing/payload` 当前二维码 payload。
-- 连接 Codex app-server，处理移动端任务、历史同步、审批、输入请求和文件 transfer。
+- Creates or reads the desktop identity under `~/.niuma/identity`.
+- Registers and authenticates the desktop agent with Niuma Server.
+- Starts the local loopback dashboard at `http://127.0.0.1:8765` by default.
+- Opens the local pairing page unless disabled.
+- Maintains the current QR pairing payload at `/api/pairing/payload`.
+- Connects to Codex app-server for mobile tasks, thread sync, approvals, input
+  requests, and file transfers.
 
-常用参数：
+Common options:
 
 ```bash
 niuma gateway --server-url https://example.invalid/niuma-server
@@ -109,47 +134,49 @@ niuma gateway --pairing-page-only
 niuma gateway --disable-codex-plugins
 ```
 
-参数语义：
+Option meanings:
 
-- `--server-url <URL>`: Niuma Server 地址。
-- `--dashboard-host <HOST>`: 本地 dashboard 监听 host。
-- `--dashboard-port <PORT>`: 本地 dashboard 监听端口。
-- `--device-name <NAME>`: 桌面 agent 展示名。
-- `--no-open`: 启动后不自动打开浏览器。
-- `--pairing-page-only`: 只启动本地配对/诊断页面，不建立完整 Server WebSocket
-  和 Codex runtime。
-- `--disable-codex-plugins`: 启动 Codex app-server 时追加 `--disable plugins`。
+- `--server-url <URL>`: Niuma Server base URL.
+- `--dashboard-host <HOST>`: local dashboard listen host.
+- `--dashboard-port <PORT>`: local dashboard listen port.
+- `--device-name <NAME>`: desktop agent display name.
+- `--no-open`: do not open the browser after startup.
+- `--pairing-page-only`: start only the local pairing and diagnostics page,
+  without the full Server WebSocket or Codex runtime.
+- `--disable-codex-plugins`: pass `--disable plugins` to the spawned Codex
+  app-server command.
 
-`gateway` 默认是完整 runtime。如果只想排查二维码页面或本地 HTTP 控制面，
-才使用 `--pairing-page-only`。
+Use `--pairing-page-only` only when diagnosing the local dashboard or QR pairing
+payload. The default `gateway` mode starts the complete runtime.
 
 ## `niuma service`
 
-`niuma service` 只管理 macOS LaunchAgent。当前不抽象 Linux systemd 或
-Windows Service。
+`niuma service` manages a macOS LaunchAgent for the gateway. It does not
+currently abstract Linux systemd or Windows Service.
 
-安装后台服务：
+Install the background service:
 
 ```bash
 niuma service install
 ```
 
-安装并立即启动：
+Install and start immediately:
 
 ```bash
 niuma service install --start
 ```
 
-安装静默后台服务：
+Install a quiet background service:
 
 ```bash
 niuma service install --no-open
 ```
 
-`--no-open` 是安装期参数，会写入 LaunchAgent plist。后续 `niuma service start`
-只按已安装 plist 启动，不临时改变是否打开浏览器。
+`--no-open` is an install-time option written into the LaunchAgent plist. Later
+`niuma service start` calls use the installed plist and do not temporarily
+change whether the browser opens.
 
-服务生命周期命令：
+Service lifecycle commands:
 
 ```bash
 niuma service start
@@ -159,18 +186,18 @@ niuma service status
 niuma service uninstall
 ```
 
-行为规则：
+Behavior:
 
-- `install` 写入 `~/Library/LaunchAgents/com.niuma.gateway.plist`。
-- plist 内写入当前 `niuma` 二进制的绝对路径，不依赖后台 `PATH`。
-- `install` 默认不启动；需要 `install --start` 或单独 `service start`。
-- `start` 前会检查 gateway 端口是否已被占用。
-- 如果端口已被前台 gateway 或其他进程占用，`start` 会失败并提示占用信息。
-- `restart` 等价于 `stop` 后再 `start`。
-- `uninstall` 会停止并删除 LaunchAgent plist。
-- `status` 同时输出 launchd 状态和 gateway `/api/status` 结果或错误。
+- `install` writes `~/Library/LaunchAgents/com.niuma.gateway.plist`.
+- The plist stores the absolute path to the current `niuma` binary and does not
+  depend on background `PATH`.
+- `install` does not start by default; use `install --start` or `service start`.
+- `start` checks whether the gateway port is already occupied.
+- `restart` is equivalent to `stop` followed by `start`.
+- `uninstall` stops and removes the LaunchAgent plist.
+- `status` prints both launchd state and gateway `/api/status` output or error.
 
-后台日志路径：
+Background logs:
 
 ```text
 ~/.niuma/logs/gateway.out.log
@@ -179,42 +206,41 @@ niuma service uninstall
 
 ## `niuma status`
 
-读取当前 gateway 的本地 HTTP 状态接口：
+Read the current gateway HTTP status endpoint:
 
 ```bash
 niuma status
 niuma status --dashboard-host 127.0.0.1 --dashboard-port 8765
 ```
 
-该命令只查询：
+The command only queries:
 
 ```text
 http://<dashboard-host>:<dashboard-port>/api/status
 ```
 
-它适合诊断前台 `niuma gateway` 或后台 `niuma service` 管理的同一个
-gateway runtime。它不读取 launchd 状态；需要 launchd 信息时使用
-`niuma service status`。
+Use `niuma service status` when launchd state is also needed.
 
 ## `niuma reset`
 
-`reset` 是破坏性测试命令，必须显式确认：
+`reset` is destructive and requires explicit confirmation:
 
 ```bash
 niuma reset --yes
 ```
 
-它会先卸载/停止 LaunchAgent，然后删除本机 Niuma 状态目录：
+It stops and uninstalls the LaunchAgent, then deletes the local Niuma state
+directory:
 
 ```text
 ~/.niuma
 ```
 
-没有 `--yes` 时会拒绝执行。
+Without `--yes`, the command refuses to run.
 
-## 本地状态目录
+## Local State
 
-Runtime 状态固定存储在 `~/.niuma`：
+Runtime state is stored under `~/.niuma`:
 
 ```text
 ~/.niuma/
@@ -225,11 +251,12 @@ Runtime 状态固定存储在 `~/.niuma`：
   transfers/
 ```
 
-`niuma-cli` 不迁移旧 Python bridge 的 `.niuma-state`，也不读取旧插件状态。
+`niuma-cli` does not migrate the old Python bridge `.niuma-state` directory and
+does not read legacy plugin state.
 
-## 常见流程
+## Common Workflows
 
-前台开发：
+Foreground development:
 
 ```bash
 cargo install --path niuma-cli
@@ -237,33 +264,36 @@ niuma gateway
 niuma status
 ```
 
-后台运行：
+Background service:
 
 ```bash
-cargo install --path niuma-cli
+cargo install niuma
 niuma service install --start
 niuma service status
 niuma service restart
 ```
 
-只查看配对页诊断：
+Pairing page diagnostics:
 
 ```bash
 niuma gateway --pairing-page-only
 ```
 
-清理本机状态重新配对：
+Reset local state and pair again:
 
 ```bash
 niuma reset --yes
 niuma gateway
 ```
 
-## 验证
+## Verification
+
+From the package directory:
 
 ```bash
-cd niuma-cli
 cargo fmt --check
 cargo check
 cargo test
+cargo package --list
+cargo publish --dry-run --registry crates-io
 ```

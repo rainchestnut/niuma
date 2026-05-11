@@ -2,6 +2,12 @@
 name = "niuma"
 version = "0.1.0"
 edition = "2024"
+description = "Desktop gateway for pairing mobile Niuma clients with Codex."
+license = "MIT"
+readme = "README.md"
+repository = "https://github.com/rainchestnut/niuma"
+keywords = ["codex", "gateway", "mobile", "cli"]
+categories = ["command-line-utilities", "development-tools"]
 
 [dependencies]
 anyhow = "1"
