@@ -501,7 +501,7 @@ async fn externalize_long_task_text(
         }
         Err(err) => {
             warn!("long text transfer failed target_device_id={device_id}: {err:#}");
-            payload["ciphertext"] = json!(encode_content_parts_payload(&vec![json!({
+            payload["ciphertext"] = json!(encode_content_parts_payload(&[json!({
                 "type": "text",
                 "text": format!(
                     "{}\n\n[完整内容上传失败，已截断以保护实时连接。]",

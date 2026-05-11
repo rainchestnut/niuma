@@ -8,7 +8,7 @@ use anyhow::{Context, Result};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::codex_app_server::CodexAppServerClient;
+use crate::codex_app_server::{CodexAppServerClient, TurnStartPayload};
 use crate::codex_projection::{
     fallback_started_turn_event, file_part_attachment_line, file_part_type,
     metadata_messages_for_thread, replay_events_from_thread, should_emit_started_user_event,
@@ -138,15 +138,15 @@ impl TaskRuntime {
             .await;
         let turn_payload = self
             .app_server
-            .start_turn_payload(
-                &thread_id,
+            .start_turn_payload(TurnStartPayload {
+                thread_id: &thread_id,
                 input_items,
-                message.model.as_deref(),
-                message.effort.as_deref(),
-                message.approval_policy.as_deref(),
-                message.approvals_reviewer.as_deref(),
-                message.sandbox_mode.as_deref(),
-            )
+                model: message.model.as_deref(),
+                effort: message.effort.as_deref(),
+                approval_policy: message.approval_policy.as_deref(),
+                approvals_reviewer: message.approvals_reviewer.as_deref(),
+                sandbox_mode: message.sandbox_mode.as_deref(),
+            })
             .await?;
         let turn_id = string_field(&turn_payload, "id").context("Codex turn missing id")?;
         let replay_payload = self
@@ -165,7 +165,7 @@ impl TaskRuntime {
                 })
                 .unwrap_or_else(|| fallback_started_turn_event(&context, &turn_id, &plaintext));
             user_event.ciphertext = plaintext;
-            messages.push(user_event.to_wire(&message.device_id));
+            messages.push(user_event.into_wire(&message.device_id));
         }
         Ok(messages)
     }
@@ -186,7 +186,7 @@ impl TaskRuntime {
         Ok(
             replay_events_from_thread(&replay_payload, message.cursor, &context)
                 .into_iter()
-                .map(|event| event.to_wire(&message.device_id))
+                .map(|event| event.into_wire(&message.device_id))
                 .collect(),
         )
     }

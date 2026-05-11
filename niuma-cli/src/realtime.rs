@@ -150,6 +150,19 @@ struct UserInputResponseInbound {
     answers: Value,
 }
 
+/// Shared state used by one authenticated agent WebSocket connection loop.
+struct AgentChannelRuntime {
+    identity: AgentIdentity,
+    config: GatewayConfig,
+    pairing: Arc<RwLock<PairingRuntimeState>>,
+    codex_app_server: Option<CodexAppServerClient>,
+    active_threads: Arc<RwLock<HashMap<String, ActiveThread>>>,
+    transfer_context: Option<TransferContext>,
+    pending_approvals: Arc<RwLock<HashMap<String, PendingApproval>>>,
+    pending_user_inputs: Arc<RwLock<HashMap<String, PendingUserInput>>>,
+    channel_status: Arc<RwLock<AgentChannelStatus>>,
+}
+
 /// Keep the authenticated agent WebSocket online in the background.
 pub fn spawn_agent_channel(
     identity: AgentIdentity,
@@ -181,24 +194,23 @@ pub fn spawn_agent_channel(
     let active_threads = Arc::new(RwLock::new(HashMap::new()));
     let pending_approvals = Arc::new(RwLock::new(HashMap::new()));
     let pending_user_inputs = Arc::new(RwLock::new(HashMap::new()));
+    let runtime = Arc::new(AgentChannelRuntime {
+        identity,
+        config,
+        pairing,
+        codex_app_server,
+        active_threads,
+        transfer_context,
+        pending_approvals,
+        pending_user_inputs,
+        channel_status,
+    });
     tokio::spawn(async move {
         loop {
             let current_session_token = session_token.read().await.clone();
-            let result = run_agent_channel(
-                &identity,
-                &config,
-                &current_session_token,
-                pairing.clone(),
-                codex_app_server.clone(),
-                active_threads.clone(),
-                transfer_context.clone(),
-                pending_approvals.clone(),
-                pending_user_inputs.clone(),
-                channel_status.clone(),
-            )
-            .await;
+            let result = run_agent_channel(&runtime, &current_session_token).await;
             {
-                let mut status = channel_status.write().await;
+                let mut status = runtime.channel_status.write().await;
                 status.connected = false;
                 status.last_error = Some(match &result {
                     Ok(()) => "agent websocket closed".to_string(),
@@ -213,31 +225,25 @@ pub fn spawn_agent_channel(
     });
 }
 
-async fn run_agent_channel(
-    identity: &AgentIdentity,
-    config: &GatewayConfig,
-    session_token: &str,
-    pairing: Arc<RwLock<PairingRuntimeState>>,
-    codex_app_server: Option<CodexAppServerClient>,
-    active_threads: Arc<RwLock<HashMap<String, ActiveThread>>>,
-    transfer_context: Option<TransferContext>,
-    pending_approvals: Arc<RwLock<HashMap<String, PendingApproval>>>,
-    pending_user_inputs: Arc<RwLock<HashMap<String, PendingUserInput>>>,
-    channel_status: Arc<RwLock<AgentChannelStatus>>,
-) -> Result<()> {
-    let url = agent_ws_url(&config.server_url, &identity.agent_id, session_token)?;
+async fn run_agent_channel(runtime: &AgentChannelRuntime, session_token: &str) -> Result<()> {
+    let url = agent_ws_url(
+        &runtime.config.server_url,
+        &runtime.identity.agent_id,
+        session_token,
+    )?;
     let (socket, _) = connect_async(url.as_str())
         .await
         .with_context(|| format!("failed to connect agent websocket {url}"))?;
     info!("agent websocket connected");
     {
-        let mut status = channel_status.write().await;
+        let mut status = runtime.channel_status.write().await;
         status.connected = true;
         status.last_connected_at = Some(unix_timestamp());
         status.last_error = None;
     }
     let (mut writer, mut reader) = socket.split();
-    let mut notifications = codex_app_server
+    let mut notifications = runtime
+        .codex_app_server
         .as_ref()
         .map(CodexAppServerClient::subscribe_notifications);
     loop {
@@ -251,30 +257,11 @@ async fn run_agent_channel(
                     continue;
                 };
                 let value: serde_json::Value = serde_json::from_str(&text)?;
-                handle_server_payload(
-                    &mut writer,
-                    identity,
-                    pairing.clone(),
-                    codex_app_server.clone(),
-                    active_threads.clone(),
-                    transfer_context.clone(),
-                    pending_approvals.clone(),
-                    pending_user_inputs.clone(),
-                    value,
-                ).await?;
+                handle_server_payload(&mut writer, runtime, value).await?;
             }
             notification = next_notification(&mut notifications), if notifications.is_some() => {
                 if let Some(notification) = notification {
-                    handle_app_server_notification(
-                        &mut writer,
-                        codex_app_server.clone(),
-                        identity,
-                        active_threads.clone(),
-                        transfer_context.clone(),
-                        pending_approvals.clone(),
-                        pending_user_inputs.clone(),
-                        notification,
-                    ).await?;
+                    handle_app_server_notification(&mut writer, runtime, notification).await?;
                 }
             }
         }
@@ -284,13 +271,7 @@ async fn run_agent_channel(
 
 async fn handle_server_payload<S, E>(
     writer: &mut S,
-    identity: &AgentIdentity,
-    pairing: Arc<RwLock<PairingRuntimeState>>,
-    codex_app_server: Option<CodexAppServerClient>,
-    active_threads: Arc<RwLock<HashMap<String, ActiveThread>>>,
-    transfer_context: Option<TransferContext>,
-    pending_approvals: Arc<RwLock<HashMap<String, PendingApproval>>>,
-    pending_user_inputs: Arc<RwLock<HashMap<String, PendingUserInput>>>,
+    runtime: &AgentChannelRuntime,
     value: Value,
 ) -> Result<()>
 where
@@ -311,21 +292,22 @@ where
     match kind.as_str() {
         "pair_handshake" => {
             let inbound: PairHandshakeMessage = serde_json::from_value(value)?;
-            let ack = handle_pair_handshake(identity, pairing, inbound).await;
+            let ack =
+                handle_pair_handshake(&runtime.identity, runtime.pairing.clone(), inbound).await;
             send_wire_message(writer, serde_json::to_value(ack)?).await?;
         }
         "metadata_refresh" => {
             let inbound: MetadataRefreshMessage = serde_json::from_value(value)?;
-            handle_metadata_refresh(writer, codex_app_server, inbound).await?;
+            handle_metadata_refresh(writer, runtime.codex_app_server.clone(), inbound).await?;
         }
         "task_start" => {
             let inbound: TaskStartInbound = serde_json::from_value(value)?;
             handle_task_start(
                 writer,
-                identity,
-                codex_app_server,
-                active_threads,
-                transfer_context,
+                &runtime.identity,
+                runtime.codex_app_server.clone(),
+                runtime.active_threads.clone(),
+                runtime.transfer_context.clone(),
                 inbound,
             )
             .await?;
@@ -334,10 +316,10 @@ where
             let inbound: ResumeThreadInbound = serde_json::from_value(value)?;
             handle_resume_thread(
                 writer,
-                identity,
-                codex_app_server,
-                active_threads,
-                transfer_context,
+                &runtime.identity,
+                runtime.codex_app_server.clone(),
+                runtime.active_threads.clone(),
+                runtime.transfer_context.clone(),
                 inbound,
             )
             .await?;
@@ -346,9 +328,9 @@ where
             let inbound: BranchChangesRequest = serde_json::from_value(value)?;
             handle_branch_changes_request(
                 writer,
-                identity,
-                codex_app_server.as_ref(),
-                transfer_context.as_ref(),
+                &runtime.identity,
+                runtime.codex_app_server.as_ref(),
+                runtime.transfer_context.as_ref(),
                 inbound,
             )
             .await?;
@@ -357,8 +339,8 @@ where
             let inbound: ThreadArchiveRequest = serde_json::from_value(value)?;
             handle_thread_archive_request(
                 writer,
-                codex_app_server.as_ref(),
-                active_threads,
+                runtime.codex_app_server.as_ref(),
+                runtime.active_threads.clone(),
                 inbound,
             )
             .await?;
@@ -367,26 +349,34 @@ where
             let inbound: ThreadRenameRequest = serde_json::from_value(value)?;
             handle_thread_rename_request(
                 writer,
-                codex_app_server.as_ref(),
-                active_threads,
+                runtime.codex_app_server.as_ref(),
+                runtime.active_threads.clone(),
                 inbound,
             )
             .await?;
         }
         "transfer_ready" => {
             let inbound: TransferReady = serde_json::from_value(value)?;
-            handle_transfer_ready(transfer_context.as_ref(), inbound).await?;
+            handle_transfer_ready(runtime.transfer_context.as_ref(), inbound).await?;
         }
         "approval_response" => {
-            let inbound = decrypt_approval_response(identity, value)?;
-            let response =
-                handle_approval_response(codex_app_server, pending_approvals, inbound).await?;
+            let inbound = decrypt_approval_response(&runtime.identity, value)?;
+            let response = handle_approval_response(
+                runtime.codex_app_server.clone(),
+                runtime.pending_approvals.clone(),
+                inbound,
+            )
+            .await?;
             send_wire_message(writer, response).await?;
         }
         "user_input_response" => {
-            let inbound = decrypt_user_input_response(identity, value)?;
-            if let Some(sync) =
-                handle_user_input_response(codex_app_server, pending_user_inputs, inbound).await?
+            let inbound = decrypt_user_input_response(&runtime.identity, value)?;
+            if let Some(sync) = handle_user_input_response(
+                runtime.codex_app_server.clone(),
+                runtime.pending_user_inputs.clone(),
+                inbound,
+            )
+            .await?
             {
                 send_wire_message(writer, sync).await?;
             }
@@ -643,12 +633,11 @@ async fn branch_changes_cwd(
     app_server: Option<&CodexAppServerClient>,
     thread_id: &str,
 ) -> Option<String> {
-    if let Some(app_server) = app_server {
-        if let Ok(payload) = app_server.read_thread_payload(thread_id, false).await {
-            if let Some(cwd) = string_field(&payload, "cwd") {
-                return Some(cwd);
-            }
-        }
+    if let Some(app_server) = app_server
+        && let Ok(payload) = app_server.read_thread_payload(thread_id, false).await
+        && let Some(cwd) = string_field(&payload, "cwd")
+    {
+        return Some(cwd);
     }
     None
 }
@@ -834,12 +823,7 @@ fn thread_rename_failed_wire(inbound: &ThreadRenameRequest, error: &str) -> Valu
 
 async fn handle_app_server_notification<S, E>(
     writer: &mut S,
-    codex_app_server: Option<CodexAppServerClient>,
-    identity: &AgentIdentity,
-    active_threads: Arc<RwLock<HashMap<String, ActiveThread>>>,
-    transfer_context: Option<TransferContext>,
-    pending_approvals: Arc<RwLock<HashMap<String, PendingApproval>>>,
-    pending_user_inputs: Arc<RwLock<HashMap<String, PendingUserInput>>>,
+    runtime: &AgentChannelRuntime,
     notification: Value,
 ) -> Result<()>
 where
@@ -849,11 +833,11 @@ where
     if is_app_server_request(&notification) {
         handle_app_server_request(
             writer,
-            codex_app_server,
-            identity,
-            active_threads,
-            pending_approvals,
-            pending_user_inputs,
+            runtime.codex_app_server.clone(),
+            &runtime.identity,
+            runtime.active_threads.clone(),
+            runtime.pending_approvals.clone(),
+            runtime.pending_user_inputs.clone(),
             notification,
         )
         .await?;
@@ -861,16 +845,16 @@ where
     }
     for sync in resolved_request_syncs(
         &notification,
-        pending_approvals.clone(),
-        pending_user_inputs.clone(),
+        runtime.pending_approvals.clone(),
+        runtime.pending_user_inputs.clone(),
     )
     .await
     {
         send_wire_message(writer, sync).await?;
     }
     match notification_metadata_syncs(
-        codex_app_server.as_ref(),
-        active_threads.clone(),
+        runtime.codex_app_server.as_ref(),
+        runtime.active_threads.clone(),
         &notification,
     )
     .await
@@ -885,13 +869,13 @@ where
     let Some(thread_id) = notification_thread_id(&notification) else {
         return Ok(());
     };
-    let Some(active) = active_threads.read().await.get(&thread_id).cloned() else {
+    let Some(active) = runtime.active_threads.read().await.get(&thread_id).cloned() else {
         return Ok(());
     };
     let device_id = active.device_id.clone();
     let cursor = active.cursor;
     let checkpoint = active.checkpoint.clone();
-    if let Some(app_server) = codex_app_server {
+    if let Some(app_server) = runtime.codex_app_server.clone() {
         let inbound = ResumeThreadInbound {
             request_id: None,
             device_id: device_id.clone(),
@@ -899,9 +883,13 @@ where
             cursor,
             checkpoint: checkpoint.clone(),
         };
-        match TaskRuntime::new(identity.clone(), app_server, transfer_context.clone())
-            .resume_thread_messages(inbound)
-            .await
+        match TaskRuntime::new(
+            runtime.identity.clone(),
+            app_server,
+            runtime.transfer_context.clone(),
+        )
+        .resume_thread_messages(inbound)
+        .await
         {
             Ok(messages) if !messages.is_empty() => {
                 let completion = thread_sync_completed(
@@ -914,10 +902,10 @@ where
                 );
                 send_wire_messages(
                     writer,
-                    identity,
+                    &runtime.identity,
                     messages,
-                    active_threads.clone(),
-                    transfer_context.as_ref(),
+                    runtime.active_threads.clone(),
+                    runtime.transfer_context.as_ref(),
                 )
                 .await?;
                 send_wire_message(writer, completion).await?;
@@ -930,8 +918,8 @@ where
     // request an APNs wakeup.
     maybe_send_task_progress_push(
         writer,
-        identity,
-        active_threads,
+        &runtime.identity,
+        runtime.active_threads.clone(),
         &notification,
         &device_id,
         &thread_id,
@@ -2341,6 +2329,13 @@ fn agent_ws_url(server_url: &str, agent_id: &str, session_token: &str) -> Result
     Ok(url)
 }
 
+fn unix_timestamp() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
@@ -2619,11 +2614,4 @@ mod tests {
         assert_eq!(response["request_id"], "input-1");
         assert_eq!(response["error"], "desktop app-server is not connected");
     }
-}
-
-fn unix_timestamp() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs() as i64
 }

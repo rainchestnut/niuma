@@ -29,6 +29,17 @@ pub struct ModelState {
     pub available_models: Vec<String>,
 }
 
+/// Complete Codex `turn/start` payload assembled from mobile task settings.
+pub(crate) struct TurnStartPayload<'a> {
+    pub(crate) thread_id: &'a str,
+    pub(crate) input_items: Vec<Value>,
+    pub(crate) model: Option<&'a str>,
+    pub(crate) effort: Option<&'a str>,
+    pub(crate) approval_policy: Option<&'a str>,
+    pub(crate) approvals_reviewer: Option<&'a str>,
+    pub(crate) sandbox_mode: Option<&'a str>,
+}
+
 #[derive(Clone)]
 pub struct CodexAppServerClient {
     inner: Arc<CodexAppServerInner>,
@@ -313,25 +324,8 @@ impl CodexAppServerClient {
     }
 
     /// Start a user turn with Codex-native input items.
-    pub async fn start_turn_payload(
-        &self,
-        thread_id: &str,
-        input_items: Vec<Value>,
-        model: Option<&str>,
-        effort: Option<&str>,
-        approval_policy: Option<&str>,
-        approvals_reviewer: Option<&str>,
-        sandbox_mode: Option<&str>,
-    ) -> Result<Value> {
-        let params = turn_start_params(
-            thread_id,
-            input_items,
-            model,
-            effort,
-            approval_policy,
-            approvals_reviewer,
-            sandbox_mode,
-        );
+    pub async fn start_turn_payload(&self, payload: TurnStartPayload<'_>) -> Result<Value> {
+        let params = turn_start_params(payload);
         let result = self.request("turn/start", params).await?;
         result
             .get("turn")
@@ -526,30 +520,22 @@ fn push_model_id(models: &mut Vec<String>, model: &str) {
     }
 }
 
-fn turn_start_params(
-    thread_id: &str,
-    input_items: Vec<Value>,
-    model: Option<&str>,
-    effort: Option<&str>,
-    approval_policy: Option<&str>,
-    approvals_reviewer: Option<&str>,
-    sandbox_mode: Option<&str>,
-) -> Value {
+fn turn_start_params(payload: TurnStartPayload<'_>) -> Value {
     let mut params = json!({
-        "threadId": thread_id,
-        "input": input_items,
+        "threadId": payload.thread_id,
+        "input": payload.input_items,
     });
-    if let Some(model) = model {
+    if let Some(model) = payload.model {
         params["model"] = json!(model);
     }
-    if let Some(effort) = effort {
+    if let Some(effort) = payload.effort {
         params["effort"] = json!(effort);
     }
     apply_approval_overrides(
         &mut params,
-        approval_policy,
-        approvals_reviewer,
-        sandbox_mode,
+        payload.approval_policy,
+        payload.approvals_reviewer,
+        payload.sandbox_mode,
         SandboxOverrideShape::TurnStart,
     );
     params
@@ -652,15 +638,15 @@ mod tests {
 
     #[test]
     fn turn_start_params_include_model_and_effort_overrides() {
-        let params = turn_start_params(
-            "thread-1",
-            vec![json!({ "type": "text", "text": "hello" })],
-            Some("gpt-5.5"),
-            Some("xhigh"),
-            None,
-            None,
-            None,
-        );
+        let params = turn_start_params(TurnStartPayload {
+            thread_id: "thread-1",
+            input_items: vec![json!({ "type": "text", "text": "hello" })],
+            model: Some("gpt-5.5"),
+            effort: Some("xhigh"),
+            approval_policy: None,
+            approvals_reviewer: None,
+            sandbox_mode: None,
+        });
 
         assert_eq!(params["threadId"], "thread-1");
         assert_eq!(params["model"], "gpt-5.5");
@@ -670,15 +656,15 @@ mod tests {
 
     #[test]
     fn mobile_permission_overrides_map_to_app_server_params() {
-        let turn = turn_start_params(
-            "thread-1",
-            vec![json!({ "type": "text", "text": "hello" })],
-            None,
-            None,
-            Some("on-request"),
-            Some("guardian_subagent"),
-            Some("workspace-write"),
-        );
+        let turn = turn_start_params(TurnStartPayload {
+            thread_id: "thread-1",
+            input_items: vec![json!({ "type": "text", "text": "hello" })],
+            model: None,
+            effort: None,
+            approval_policy: Some("on-request"),
+            approvals_reviewer: Some("guardian_subagent"),
+            sandbox_mode: Some("workspace-write"),
+        });
 
         assert_eq!(turn["approvalPolicy"], "on-request");
         assert_eq!(turn["approvalsReviewer"], "guardian_subagent");

@@ -43,10 +43,10 @@ fn mcp_tool_result_text(tool_call: &Value) -> String {
     let mut texts = Vec::new();
     if let Some(content) = result.get("content").and_then(Value::as_array) {
         for block in content {
-            if block.get("type").and_then(Value::as_str) == Some("text") {
-                if let Some(text) = string_field(block, "text") {
-                    texts.push(text);
-                }
+            if block.get("type").and_then(Value::as_str) == Some("text")
+                && let Some(text) = string_field(block, "text")
+            {
+                texts.push(text);
             }
         }
     }
@@ -175,10 +175,10 @@ fn section_diagnostic_messages(result_text: &str, key: &str) -> Vec<String> {
         let trimmed = line.trim();
         if trimmed.starts_with(section) {
             in_section = true;
-            if let Some(after_colon) = trimmed.split_once(':').map(|(_, tail)| tail.trim()) {
-                if !after_colon.is_empty() {
-                    messages.push(clean_diagnostic_line(after_colon));
-                }
+            if let Some(after_colon) = trimmed.split_once(':').map(|(_, tail)| tail.trim())
+                && !after_colon.is_empty()
+            {
+                messages.push(clean_diagnostic_line(after_colon));
             }
             continue;
         }

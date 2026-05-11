@@ -86,14 +86,14 @@ pub async fn print_status() -> Result<()> {
     let loaded = launchd_loaded()?;
     println!("launchd_label={}", paths::LAUNCH_AGENT_LABEL);
     println!("launchd_loaded={loaded}");
-    if loaded {
-        if let Ok(output) = launchctl_output([
+    if loaded
+        && let Ok(output) = launchctl_output([
             "print".to_string(),
             format!("{}/{}", launchd_domain()?, paths::LAUNCH_AGENT_LABEL),
-        ]) {
-            for line in output.lines().take(12) {
-                println!("launchd: {line}");
-            }
+        ])
+    {
+        for line in output.lines().take(12) {
+            println!("launchd: {line}");
         }
     }
     let config = StatusConfig::from_args(&crate::cli::StatusArgs {

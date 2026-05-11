@@ -50,7 +50,7 @@ pub(crate) struct ThreadEvent {
 }
 
 impl ThreadEvent {
-    pub(crate) fn to_wire(self, device_id: &str) -> Value {
+    pub(crate) fn into_wire(self, device_id: &str) -> Value {
         json!({
             "kind": "task_update",
             "device_id": device_id,
@@ -112,16 +112,16 @@ pub(crate) fn replay_events_from_thread(
     for turn in turns {
         let turn_id = string_field(&turn, "id").unwrap_or_else(|| "turn".to_string());
         let mut entries = extract_turn_entries(&turn, context.cwd.as_deref());
-        if entries.is_empty() {
-            if let Some(preview) = string_field(&turn, "preview") {
-                entries.push(ThreadEntry {
-                    entry_id: turn_id.clone(),
-                    role: "user".to_string(),
-                    text: preview,
-                    item_type: "userMessage".to_string(),
-                    phase: None,
-                });
-            }
+        if entries.is_empty()
+            && let Some(preview) = string_field(&turn, "preview")
+        {
+            entries.push(ThreadEntry {
+                entry_id: turn_id.clone(),
+                role: "user".to_string(),
+                text: preview,
+                item_type: "userMessage".to_string(),
+                phase: None,
+            });
         }
         let created_at = number_field(&turn, "startedAt").or(context.updated_at);
         for entry in entries {
@@ -176,38 +176,35 @@ pub(crate) fn extract_turn_entries(turn: &Value, cwd: Option<&str>) -> Vec<Threa
             item_type: item_type(item),
             phase: item_phase(item),
         });
-        if let Some(summary) = final_file_change_summary.as_ref() {
-            if item_index == summary.final_index {
-                if let Some(part) =
-                    diff_summary::file_change_summary_part(&turn_id, &entry_id, &summary.items, cwd)
-                {
-                    entries.push(ThreadEntry {
-                        entry_id: final_file_change_entry_id(&turn_id, &summary.items),
-                        role: "assistant".to_string(),
-                        text: encode_content_parts_payload(&[part]),
-                        item_type: "fileChange".to_string(),
-                        phase: Some("final_answer_file_change".to_string()),
-                    });
-                }
-            }
+        if let Some(summary) = final_file_change_summary.as_ref()
+            && item_index == summary.final_index
+            && let Some(part) =
+                diff_summary::file_change_summary_part(&turn_id, &entry_id, &summary.items, cwd)
+        {
+            entries.push(ThreadEntry {
+                entry_id: final_file_change_entry_id(&turn_id, &summary.items),
+                role: "assistant".to_string(),
+                text: encode_content_parts_payload(&[part]),
+                item_type: "fileChange".to_string(),
+                phase: Some("final_answer_file_change".to_string()),
+            });
         }
     }
-    if let Some(input_text) = turn_input_text(turn, &entries) {
-        if !entries
+    if let Some(input_text) = turn_input_text(turn, &entries)
+        && !entries
             .iter()
             .any(|entry| entry.role == "user" && same_text(&entry.text, &input_text))
-        {
-            entries.insert(
-                0,
-                ThreadEntry {
-                    entry_id: fallback_input_entry_id(&turn_id),
-                    role: "user".to_string(),
-                    text: input_text,
-                    item_type: "userMessage".to_string(),
-                    phase: None,
-                },
-            );
-        }
+    {
+        entries.insert(
+            0,
+            ThreadEntry {
+                entry_id: fallback_input_entry_id(&turn_id),
+                role: "user".to_string(),
+                text: input_text,
+                item_type: "userMessage".to_string(),
+                phase: None,
+            },
+        );
     }
     entries
 }
@@ -432,10 +429,11 @@ fn content_parts_from_text(text: &str) -> Vec<Value> {
     if !suffix.is_empty() {
         parts.push(json!({ "type": "text", "text": suffix }));
     }
-    if parts.is_empty() && text.trim_start().starts_with("data:image/") {
-        if let Some(part) = file_part_from_data_url(text.trim(), None, None) {
-            parts.push(part);
-        }
+    if parts.is_empty()
+        && text.trim_start().starts_with("data:image/")
+        && let Some(part) = file_part_from_data_url(text.trim(), None, None)
+    {
+        parts.push(part);
     }
     if parts.is_empty() {
         parts.push(json!({ "type": "text", "text": text }));
@@ -458,24 +456,20 @@ fn collect_item_files(value: &Value, parts: &mut Vec<Value>) {
         }
         Value::Object(map) => {
             let item_type = map.get("type").and_then(Value::as_str).unwrap_or_default();
-            if matches!(item_type, "localImage" | "local_image") {
-                if let Some(path_value) = map
+            if matches!(item_type, "localImage" | "local_image")
+                && let Some(path_value) = map
                     .get("path")
                     .or_else(|| map.get("file_path"))
                     .or_else(|| map.get("url"))
                     .and_then(Value::as_str)
-                {
-                    if let Some(path) = local_markdown_image_path(path_value).or_else(|| {
-                        Some(std::path::PathBuf::from(path_value)).filter(|path| path.is_file())
-                    }) {
-                        if let Some(part) =
-                            file_part_from_local_path(&path, string_field(value, "alt").as_deref())
-                        {
-                            parts.push(part);
-                            return;
-                        }
-                    }
-                }
+                && let Some(path) = local_markdown_image_path(path_value).or_else(|| {
+                    Some(std::path::PathBuf::from(path_value)).filter(|path| path.is_file())
+                })
+                && let Some(part) =
+                    file_part_from_local_path(&path, string_field(value, "alt").as_deref())
+            {
+                parts.push(part);
+                return;
             }
             if matches!(item_type, "input_image" | "image" | "output_image") {
                 let data_url = map
@@ -483,35 +477,35 @@ fn collect_item_files(value: &Value, parts: &mut Vec<Value>) {
                     .or_else(|| map.get("url"))
                     .or_else(|| map.get("data_url"))
                     .and_then(Value::as_str);
-                if let Some(data_url) = data_url.filter(|value| value.starts_with("data:image/")) {
-                    if let Some(part) = file_part_from_data_url(
+                if let Some(data_url) = data_url.filter(|value| value.starts_with("data:image/"))
+                    && let Some(part) = file_part_from_data_url(
                         data_url,
                         string_field(value, "file_name")
                             .or_else(|| string_field(value, "filename"))
                             .or_else(|| string_field(value, "name"))
                             .as_deref(),
                         string_field(value, "alt").as_deref(),
-                    ) {
-                        parts.push(part);
-                        return;
-                    }
+                    )
+                {
+                    parts.push(part);
+                    return;
                 }
                 let data = map.get("data").and_then(Value::as_str);
                 let mime_type = map
                     .get("mimeType")
                     .or_else(|| map.get("mime_type"))
                     .and_then(Value::as_str);
-                if let (Some(data), Some(mime_type)) = (data, mime_type) {
-                    if mime_type.starts_with("image/") {
-                        let data_url = format!("data:{mime_type};base64,{data}");
-                        if let Some(part) = file_part_from_data_url(
-                            &data_url,
-                            None,
-                            string_field(value, "alt").as_deref(),
-                        ) {
-                            parts.push(part);
-                            return;
-                        }
+                if let (Some(data), Some(mime_type)) = (data, mime_type)
+                    && mime_type.starts_with("image/")
+                {
+                    let data_url = format!("data:{mime_type};base64,{data}");
+                    if let Some(part) = file_part_from_data_url(
+                        &data_url,
+                        None,
+                        string_field(value, "alt").as_deref(),
+                    ) {
+                        parts.push(part);
+                        return;
                     }
                 }
             }
@@ -599,10 +593,8 @@ fn push_unique_file_part(parts: &mut Vec<Value>, part: Value) {
 
 fn collect_item_text(value: &Value, texts: &mut Vec<String>) {
     match value {
-        Value::String(text) => {
-            if !text.starts_with("data:image/") && !text.trim().is_empty() {
-                texts.push(text.trim().to_string());
-            }
+        Value::String(text) if !text.starts_with("data:image/") && !text.trim().is_empty() => {
+            texts.push(text.trim().to_string());
         }
         Value::Array(items) => {
             for item in items {
