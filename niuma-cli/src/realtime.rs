@@ -6,7 +6,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use futures_util::{Sink, SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::{Map, Number, Value, json};
 use tokio::sync::{RwLock, broadcast};
 use tokio::time::{Duration, sleep};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
@@ -125,6 +125,37 @@ struct PendingUserInput {
     request_id: String,
     app_server_request_id: Value,
     thread_id: String,
+    response_format: UserInputResponseFormat,
+}
+
+/// Identifies how a mobile user-input answer must be translated back to the
+/// Codex app-server request that originally blocked the turn.
+#[derive(Debug, Clone)]
+enum UserInputResponseFormat {
+    CodexRequestUserInput,
+    McpElicitation(McpElicitationResponseFormat),
+}
+
+#[derive(Debug, Clone)]
+enum McpElicitationResponseFormat {
+    Form { fields: Vec<McpElicitationField> },
+    Url,
+}
+
+#[derive(Debug, Clone)]
+struct McpElicitationField {
+    id: String,
+    value_kind: McpElicitationValueKind,
+    required: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum McpElicitationValueKind {
+    String,
+    Number,
+    Integer,
+    Boolean,
+    StringArray,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1173,6 +1204,29 @@ where
         }
         return Ok(());
     }
+    if method == "mcpServer/elicitation/request" {
+        if let Some((message, pending)) = build_mcp_elicitation_request(&request_id, &params).await
+        {
+            pending_user_inputs
+                .write()
+                .await
+                .insert(pending.request_id.clone(), pending);
+            if let Some(device_id) =
+                active_device_for_thread(&active_threads, &message.thread_id).await
+            {
+                send_wire_message(
+                    writer,
+                    user_input_request_wire(identity, &device_id, &message)?,
+                )
+                .await?;
+            }
+        } else {
+            app_server
+                .respond_error(request_id, -32600, "invalid mcp elicitation payload")
+                .await?;
+        }
+        return Ok(());
+    }
     if let Some(approval_type) = approval_type_for_method(&method) {
         if let Some((message, pending)) =
             build_approval_request(&request_id, &method, approval_type, &params).await
@@ -1318,11 +1372,22 @@ async fn handle_user_input_response(
             "user input request is no longer pending",
         )));
     };
+    let response_payload = match user_input_app_server_response(&pending, &inbound.answers) {
+        Ok(payload) => payload,
+        Err(error) => {
+            pending_user_inputs
+                .write()
+                .await
+                .insert(pending.request_id.clone(), pending.clone());
+            return Ok(Some(user_input_response_failed(
+                &inbound.device_id,
+                &inbound.request_id,
+                &format!("user input response failed: {error:#}"),
+            )));
+        }
+    };
     if let Err(error) = app_server
-        .respond(
-            pending.app_server_request_id.clone(),
-            json!({ "answers": inbound.answers }),
-        )
+        .respond(pending.app_server_request_id.clone(), response_payload)
         .await
     {
         pending_user_inputs
@@ -1519,6 +1584,120 @@ async fn build_user_input_request(
         request_id: request_id.clone(),
         app_server_request_id: app_server_request_id.clone(),
         thread_id: thread_id.clone(),
+        response_format: UserInputResponseFormat::CodexRequestUserInput,
+    };
+    Some((
+        UserInputWireData {
+            request_id,
+            thread_id,
+            questions,
+        },
+        pending,
+    ))
+}
+
+/// Projects Codex MCP elicitation callbacks into the existing mobile
+/// user-input protocol while retaining enough schema metadata to answer the
+/// original JSON-RPC request later.
+async fn build_mcp_elicitation_request(
+    app_server_request_id: &Value,
+    params: &Value,
+) -> Option<(UserInputWireData, PendingUserInput)> {
+    let thread_id = params.get("threadId")?.as_str()?.to_string();
+    match params.get("mode")?.as_str()? {
+        "form" => build_mcp_form_elicitation_request(app_server_request_id, params, thread_id),
+        "url" => build_mcp_url_elicitation_request(app_server_request_id, params, thread_id),
+        _ => None,
+    }
+}
+
+fn build_mcp_form_elicitation_request(
+    app_server_request_id: &Value,
+    params: &Value,
+    thread_id: String,
+) -> Option<(UserInputWireData, PendingUserInput)> {
+    let request_id = request_id_string(app_server_request_id);
+    let message = params.get("message").and_then(Value::as_str).unwrap_or("");
+    let schema = params.get("requestedSchema")?;
+    let properties = schema.get("properties")?.as_object()?;
+    let required = schema
+        .get("required")
+        .and_then(Value::as_array)
+        .map(|required| {
+            required
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    let mut fields = Vec::new();
+    let mut questions = Vec::new();
+    for (index, (field_id, field_schema)) in properties.iter().enumerate() {
+        let value_kind = mcp_field_value_kind(field_schema)?;
+        let required = required.iter().any(|required| required == field_id);
+        fields.push(McpElicitationField {
+            id: field_id.clone(),
+            value_kind,
+            required,
+        });
+        questions.push(project_mcp_elicitation_question(
+            field_id,
+            field_schema,
+            message,
+            index == 0,
+        ));
+    }
+    if questions.is_empty() {
+        questions.push(mcp_elicitation_confirmation_question(
+            "confirm",
+            params.get("serverName").and_then(Value::as_str),
+            message,
+        ));
+    }
+
+    let pending = PendingUserInput {
+        request_id: request_id.clone(),
+        app_server_request_id: app_server_request_id.clone(),
+        thread_id: thread_id.clone(),
+        response_format: UserInputResponseFormat::McpElicitation(
+            McpElicitationResponseFormat::Form { fields },
+        ),
+    };
+    Some((
+        UserInputWireData {
+            request_id,
+            thread_id,
+            questions,
+        },
+        pending,
+    ))
+}
+
+fn build_mcp_url_elicitation_request(
+    app_server_request_id: &Value,
+    params: &Value,
+    thread_id: String,
+) -> Option<(UserInputWireData, PendingUserInput)> {
+    let request_id = params
+        .get("elicitationId")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .unwrap_or_else(|| request_id_string(app_server_request_id));
+    let message = params.get("message").and_then(Value::as_str).unwrap_or("");
+    let url = params.get("url")?.as_str()?;
+    let prompt = join_prompt(message, Some(url));
+    let questions = vec![mcp_elicitation_confirmation_question(
+        "action",
+        params.get("serverName").and_then(Value::as_str),
+        &prompt,
+    )];
+    let pending = PendingUserInput {
+        request_id: request_id.clone(),
+        app_server_request_id: app_server_request_id.clone(),
+        thread_id: thread_id.clone(),
+        response_format: UserInputResponseFormat::McpElicitation(McpElicitationResponseFormat::Url),
     };
     Some((
         UserInputWireData {
@@ -1659,6 +1838,285 @@ fn project_user_input_question(question: Value) -> Value {
         "is_other": question.get("isOther").and_then(Value::as_bool).unwrap_or(false),
         "is_secret": question.get("isSecret").and_then(Value::as_bool).unwrap_or(false),
     })
+}
+
+fn project_mcp_elicitation_question(
+    field_id: &str,
+    field_schema: &Value,
+    request_message: &str,
+    include_request_message: bool,
+) -> Value {
+    let description = field_schema.get("description").and_then(Value::as_str);
+    let prompt = if include_request_message {
+        join_prompt(request_message, description)
+    } else {
+        description.unwrap_or(request_message).to_string()
+    };
+    let options = mcp_elicitation_options(field_schema);
+    let is_other = options.is_empty();
+    json!({
+        "question_id": field_id,
+        "header": field_schema
+            .get("title")
+            .and_then(Value::as_str)
+            .unwrap_or(field_id),
+        "prompt": prompt,
+        "options": options,
+        "is_other": is_other,
+        "is_secret": false,
+    })
+}
+
+fn mcp_elicitation_confirmation_question(
+    question_id: &str,
+    server_name: Option<&str>,
+    prompt: &str,
+) -> Value {
+    json!({
+        "question_id": question_id,
+        "header": server_name.unwrap_or("MCP request"),
+        "prompt": prompt,
+        "options": [
+            {"label": "accept", "description": "Continue"},
+            {"label": "decline", "description": "Decline"},
+        ],
+        "is_other": false,
+        "is_secret": false,
+    })
+}
+
+fn join_prompt(message: &str, detail: Option<&str>) -> String {
+    let message = message.trim();
+    let detail = detail.unwrap_or_default().trim();
+    match (message.is_empty(), detail.is_empty()) {
+        (true, true) => "Additional input is required.".to_string(),
+        (false, true) => message.to_string(),
+        (true, false) => detail.to_string(),
+        (false, false) => format!("{message}\n\n{detail}"),
+    }
+}
+
+fn mcp_field_value_kind(field_schema: &Value) -> Option<McpElicitationValueKind> {
+    match field_schema.get("type").and_then(Value::as_str)? {
+        "string" => Some(McpElicitationValueKind::String),
+        "number" => Some(McpElicitationValueKind::Number),
+        "integer" => Some(McpElicitationValueKind::Integer),
+        "boolean" => Some(McpElicitationValueKind::Boolean),
+        "array" => Some(McpElicitationValueKind::StringArray),
+        _ => None,
+    }
+}
+
+fn mcp_elicitation_options(field_schema: &Value) -> Vec<Value> {
+    if let Some(options) = field_schema.get("oneOf").and_then(Value::as_array) {
+        return mcp_const_options(options);
+    }
+    if let Some(options) = field_schema.get("enum").and_then(Value::as_array) {
+        let enum_names = field_schema.get("enumNames").and_then(Value::as_array);
+        return options
+            .iter()
+            .enumerate()
+            .filter_map(|(index, value)| {
+                let label = value.as_str()?;
+                let description = enum_names
+                    .and_then(|names| names.get(index))
+                    .and_then(Value::as_str)
+                    .filter(|name| *name != label)
+                    .unwrap_or_default();
+                Some(json!({
+                    "label": label,
+                    "description": description,
+                }))
+            })
+            .collect();
+    }
+    if field_schema.get("type").and_then(Value::as_str) == Some("boolean") {
+        return vec![
+            json!({"label": "true", "description": "Yes"}),
+            json!({"label": "false", "description": "No"}),
+        ];
+    }
+    if let Some(items) = field_schema.get("items") {
+        if let Some(options) = items.get("anyOf").and_then(Value::as_array) {
+            return mcp_const_options(options);
+        }
+        if let Some(options) = items.get("enum").and_then(Value::as_array) {
+            return options
+                .iter()
+                .filter_map(Value::as_str)
+                .map(|label| {
+                    json!({
+                        "label": label,
+                        "description": "",
+                    })
+                })
+                .collect();
+        }
+    }
+    Vec::new()
+}
+
+fn mcp_const_options(options: &[Value]) -> Vec<Value> {
+    options
+        .iter()
+        .filter_map(|option| {
+            let label = option.get("const").and_then(Value::as_str)?;
+            let description = option
+                .get("title")
+                .and_then(Value::as_str)
+                .filter(|title| *title != label)
+                .unwrap_or_default();
+            Some(json!({
+                "label": label,
+                "description": description,
+            }))
+        })
+        .collect()
+}
+
+/// Converts encrypted mobile user-input answers back to the response payload
+/// expected by the originating app-server callback.
+fn user_input_app_server_response(pending: &PendingUserInput, answers: &Value) -> Result<Value> {
+    match &pending.response_format {
+        UserInputResponseFormat::CodexRequestUserInput => Ok(json!({ "answers": answers })),
+        UserInputResponseFormat::McpElicitation(format) => {
+            mcp_elicitation_response_payload(format, answers)
+        }
+    }
+}
+
+fn mcp_elicitation_response_payload(
+    format: &McpElicitationResponseFormat,
+    answers: &Value,
+) -> Result<Value> {
+    match format {
+        McpElicitationResponseFormat::Form { fields } => {
+            let action = form_elicitation_action(fields, answers)?;
+            let content = if action == "accept" {
+                mcp_elicitation_form_content(fields, answers)?
+            } else {
+                Value::Null
+            };
+            Ok(json!({
+                "action": action,
+                "content": content,
+                "_meta": null,
+            }))
+        }
+        McpElicitationResponseFormat::Url => Ok(json!({
+            "action": mcp_url_elicitation_action(answers)?,
+            "content": null,
+            "_meta": null,
+        })),
+    }
+}
+
+fn form_elicitation_action(
+    fields: &[McpElicitationField],
+    answers: &Value,
+) -> Result<&'static str> {
+    if fields.is_empty() {
+        return mcp_confirmation_action(answers, "confirm");
+    }
+    Ok("accept")
+}
+
+fn mcp_url_elicitation_action(answers: &Value) -> Result<&'static str> {
+    mcp_confirmation_action(answers, "action")
+}
+
+fn mcp_confirmation_action(answers: &Value, question_id: &str) -> Result<&'static str> {
+    let values = user_input_answer_values(answers, question_id);
+    if values.len() > 1 {
+        anyhow::bail!("expected one answer for {question_id}");
+    }
+    match values.first().map(String::as_str) {
+        Some("decline") => Ok("decline"),
+        Some("accept") => Ok("accept"),
+        Some(other) => anyhow::bail!("unsupported confirmation answer {other}"),
+        None => anyhow::bail!("missing confirmation answer for {question_id}"),
+    }
+}
+
+fn mcp_elicitation_form_content(fields: &[McpElicitationField], answers: &Value) -> Result<Value> {
+    let mut content = Map::new();
+    for field in fields {
+        let values = user_input_answer_values(answers, &field.id);
+        if values.is_empty() {
+            if field.required {
+                anyhow::bail!("missing required answer for {}", field.id);
+            }
+            continue;
+        }
+        content.insert(field.id.clone(), mcp_answer_value(field, &values)?);
+    }
+    Ok(Value::Object(content))
+}
+
+fn mcp_answer_value(field: &McpElicitationField, values: &[String]) -> Result<Value> {
+    if field.value_kind != McpElicitationValueKind::StringArray && values.len() > 1 {
+        anyhow::bail!("expected one answer for {}", field.id);
+    }
+    let first = values
+        .first()
+        .context("missing answer value")?
+        .trim()
+        .to_string();
+    match field.value_kind {
+        McpElicitationValueKind::String => Ok(Value::String(first)),
+        McpElicitationValueKind::Number => {
+            let parsed = first
+                .parse::<f64>()
+                .with_context(|| format!("invalid number answer for {}", field.id))?;
+            let number = Number::from_f64(parsed)
+                .with_context(|| format!("invalid finite number answer for {}", field.id))?;
+            Ok(Value::Number(number))
+        }
+        McpElicitationValueKind::Integer => {
+            let parsed = first
+                .parse::<i64>()
+                .with_context(|| format!("invalid integer answer for {}", field.id))?;
+            Ok(Value::Number(Number::from(parsed)))
+        }
+        McpElicitationValueKind::Boolean => {
+            let value = match first.to_ascii_lowercase().as_str() {
+                "true" | "yes" | "1" => true,
+                "false" | "no" | "0" => false,
+                _ => anyhow::bail!("invalid boolean answer for {}", field.id),
+            };
+            Ok(Value::Bool(value))
+        }
+        McpElicitationValueKind::StringArray => Ok(Value::Array(
+            values
+                .iter()
+                .map(|value| Value::String(value.clone()))
+                .collect(),
+        )),
+    }
+}
+
+fn user_input_answer_values(answers: &Value, question_id: &str) -> Vec<String> {
+    let Some(answer) = answers.get(question_id) else {
+        return Vec::new();
+    };
+    if let Some(values) = answer.get("answers").and_then(Value::as_array) {
+        return values
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::to_string)
+            .collect();
+    }
+    if let Some(values) = answer.as_array() {
+        return values
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::to_string)
+            .collect();
+    }
+    answer
+        .as_str()
+        .map(|value| vec![value.to_string()])
+        .unwrap_or_default()
 }
 
 fn approval_type_for_method(method: &str) -> Option<&'static str> {
@@ -2345,11 +2803,13 @@ mod tests {
     use tokio::sync::RwLock;
 
     use super::{
-        ActiveThread, ApprovalResponseInbound, PendingApproval, ThreadArchiveRequest,
-        ThreadRenameRequest, UserInputResponseInbound, agent_ws_url, claim_task_progress_push,
-        handle_approval_response, handle_user_input_response, task_progress_push_marker,
-        thread_archive_failed_wire, thread_archive_result_wire, thread_rename_failed_wire,
-        thread_rename_result_wire, thread_sync_completed,
+        ActiveThread, ApprovalResponseInbound, McpElicitationField, McpElicitationResponseFormat,
+        McpElicitationValueKind, PendingApproval, PendingUserInput, ThreadArchiveRequest,
+        ThreadRenameRequest, UserInputResponseFormat, UserInputResponseInbound, agent_ws_url,
+        build_mcp_elicitation_request, claim_task_progress_push, handle_approval_response,
+        handle_user_input_response, task_progress_push_marker, thread_archive_failed_wire,
+        thread_archive_result_wire, thread_rename_failed_wire, thread_rename_result_wire,
+        thread_sync_completed, user_input_app_server_response,
     };
 
     #[test]
@@ -2541,6 +3001,173 @@ mod tests {
         assert!(claim_task_progress_push(active_threads.clone(), "thread-1", "turn:turn-1").await);
         assert!(!claim_task_progress_push(active_threads.clone(), "thread-1", "turn:turn-1").await);
         assert!(claim_task_progress_push(active_threads, "thread-1", "turn:turn-2").await);
+    }
+
+    #[tokio::test]
+    async fn mcp_form_elicitation_projects_to_mobile_user_input() {
+        let (message, pending) = build_mcp_elicitation_request(
+            &json!("rpc-1"),
+            &json!({
+                "mode": "form",
+                "threadId": "thread-1",
+                "serverName": "github",
+                "message": "Choose repository settings.",
+                "requestedSchema": {
+                    "type": "object",
+                    "required": ["visibility", "notify"],
+                    "properties": {
+                        "visibility": {
+                            "type": "string",
+                            "title": "Visibility",
+                            "description": "Who can see the repository?",
+                            "oneOf": [
+                                {"const": "private", "title": "Private"},
+                                {"const": "public", "title": "Public"}
+                            ]
+                        },
+                        "notify": {
+                            "type": "boolean",
+                            "title": "Notify"
+                        }
+                    }
+                }
+            }),
+        )
+        .await
+        .expect("mcp elicitation should project");
+
+        assert_eq!(message.request_id, "rpc-1");
+        assert_eq!(message.thread_id, "thread-1");
+        assert_eq!(message.questions.len(), 2);
+        assert_eq!(message.questions[0]["question_id"], "notify");
+        assert_eq!(message.questions[0]["options"][0]["label"], "true");
+        assert_eq!(message.questions[1]["question_id"], "visibility");
+        assert_eq!(message.questions[1]["options"][0]["label"], "private");
+        assert!(
+            message.questions[1]["prompt"]
+                .as_str()
+                .expect("prompt should be a string")
+                .contains("Who can see the repository?")
+        );
+        match pending.response_format {
+            UserInputResponseFormat::McpElicitation(McpElicitationResponseFormat::Form {
+                fields,
+            }) => {
+                assert_eq!(fields.len(), 2);
+                assert_eq!(fields[0].id, "notify");
+                assert!(fields[0].required);
+                assert_eq!(fields[0].value_kind, McpElicitationValueKind::Boolean);
+                assert_eq!(fields[1].id, "visibility");
+                assert!(fields[1].required);
+                assert_eq!(fields[1].value_kind, McpElicitationValueKind::String);
+            }
+            _ => panic!("unexpected response format"),
+        }
+    }
+
+    #[test]
+    fn mcp_form_elicitation_response_builds_structured_content() {
+        let pending = PendingUserInput {
+            request_id: "input-1".to_string(),
+            app_server_request_id: json!("rpc-1"),
+            thread_id: "thread-1".to_string(),
+            response_format: UserInputResponseFormat::McpElicitation(
+                McpElicitationResponseFormat::Form {
+                    fields: vec![
+                        McpElicitationField {
+                            id: "name".to_string(),
+                            value_kind: McpElicitationValueKind::String,
+                            required: true,
+                        },
+                        McpElicitationField {
+                            id: "count".to_string(),
+                            value_kind: McpElicitationValueKind::Integer,
+                            required: true,
+                        },
+                        McpElicitationField {
+                            id: "enabled".to_string(),
+                            value_kind: McpElicitationValueKind::Boolean,
+                            required: true,
+                        },
+                        McpElicitationField {
+                            id: "labels".to_string(),
+                            value_kind: McpElicitationValueKind::StringArray,
+                            required: false,
+                        },
+                    ],
+                },
+            ),
+        };
+
+        let response = user_input_app_server_response(
+            &pending,
+            &json!({
+                "name": {"answers": ["release"]},
+                "count": {"answers": ["3"]},
+                "enabled": {"answers": ["true"]},
+                "labels": {"answers": ["ios", "cli"]}
+            }),
+        )
+        .expect("response should be convertible");
+
+        assert_eq!(response["action"], "accept");
+        assert_eq!(response["content"]["name"], "release");
+        assert_eq!(response["content"]["count"], 3);
+        assert_eq!(response["content"]["enabled"], true);
+        assert_eq!(response["content"]["labels"], json!(["ios", "cli"]));
+        assert!(response["_meta"].is_null());
+    }
+
+    #[test]
+    fn mcp_form_elicitation_response_rejects_multiple_scalar_answers() {
+        let pending = PendingUserInput {
+            request_id: "input-1".to_string(),
+            app_server_request_id: json!("rpc-1"),
+            thread_id: "thread-1".to_string(),
+            response_format: UserInputResponseFormat::McpElicitation(
+                McpElicitationResponseFormat::Form {
+                    fields: vec![McpElicitationField {
+                        id: "visibility".to_string(),
+                        value_kind: McpElicitationValueKind::String,
+                        required: true,
+                    }],
+                },
+            ),
+        };
+
+        let error = user_input_app_server_response(
+            &pending,
+            &json!({
+                "visibility": {"answers": ["private", "public"]}
+            }),
+        )
+        .expect_err("scalar elicitation fields must not accept multiple values");
+
+        assert!(error.to_string().contains("expected one answer"));
+    }
+
+    #[test]
+    fn mcp_url_elicitation_response_maps_decline_action() {
+        let pending = PendingUserInput {
+            request_id: "input-1".to_string(),
+            app_server_request_id: json!("rpc-1"),
+            thread_id: "thread-1".to_string(),
+            response_format: UserInputResponseFormat::McpElicitation(
+                McpElicitationResponseFormat::Url,
+            ),
+        };
+
+        let response = user_input_app_server_response(
+            &pending,
+            &json!({
+                "action": {"answers": ["decline"]}
+            }),
+        )
+        .expect("url elicitation should be convertible");
+
+        assert_eq!(response["action"], "decline");
+        assert!(response["content"].is_null());
+        assert!(response["_meta"].is_null());
     }
 
     #[tokio::test]
