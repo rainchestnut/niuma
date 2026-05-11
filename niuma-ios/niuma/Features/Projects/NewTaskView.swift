@@ -125,6 +125,7 @@ struct NewTaskView: View {
             prompt: $prompt,
             placeholder: appModel.localized("new_task.placeholder"),
             attachments: pendingAttachments,
+            currentBranch: nil,
             isSending: isSubmitting,
             isPromptFocused: $isPromptFocused,
             onPickPhotoOrVideo: {
