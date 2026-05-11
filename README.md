@@ -1,8 +1,58 @@
 # Niuma
 
+[中文说明](README.zh-CN.md)
+
 Niuma is an experimental mobile-to-Codex control plane. The repository contains
 the iOS client, the Rust desktop gateway, the Rust routing server, and the
 design documents that define their boundaries.
+
+## Direct Use
+
+Use the released channels when you only want to run Niuma:
+
+The `niuma` CLI is not an AI agent. It is a desktop connector that lets the
+Niuma iOS app talk to Codex by starting or connecting to `codex app-server`.
+Install Codex before starting the Niuma gateway.
+
+1. Install Codex.app or the Codex CLI.
+2. Install the iOS app from the App Store.
+3. Install the desktop gateway:
+
+```bash
+cargo install niuma
+```
+
+4. Use the hosted Niuma Server URL in the iOS app and desktop gateway settings:
+
+```text
+https://rainchestnut.com/niuma-server
+```
+
+5. Start the desktop gateway and pair the iOS app with the QR code shown by the
+   local dashboard:
+
+```bash
+niuma gateway
+```
+
+For background use on macOS:
+
+```bash
+niuma service install --start
+niuma service status
+```
+
+The desktop gateway expects Codex.app or a `codex` executable on `PATH` so it
+can start `codex app-server`.
+
+## Architecture
+
+![Niuma architecture overview](design/image.png)
+
+The pairing and message path uses end-to-end encryption. The server relays and
+stores encrypted data and metadata, but never plaintext message content.
+
+![Niuma end-to-end encrypted communication flow](design/niuma-end-to-end-encrypted-communication-flow.png)
 
 ## Repository Shape
 
@@ -60,7 +110,8 @@ files or a secret manager.
 
 ## iOS App
 
-The iOS app is a native SwiftUI project.
+The iOS app is a native SwiftUI project. For normal use, install the published
+app from the App Store. For source development:
 
 ```bash
 cd niuma-ios
@@ -77,13 +128,19 @@ and talks to the server through `LiveNiumaController`.
 The desktop bridge is the Rust `niuma` binary. It is installed through Cargo and
 can run in the foreground or as a macOS LaunchAgent service.
 
+Package documentation lives with the crate: [English](niuma-cli/README.md),
+[中文](niuma-cli/README.zh-CN.md).
+
 ```bash
-cargo install --path niuma-cli
+cargo install niuma
 niuma gateway
 niuma service install --start
 niuma service restart
 niuma status
 ```
+
+For local source builds, use `cargo install --path niuma-cli` from the repository
+root.
 
 The gateway prefers the Codex.app bundled `codex app-server` binary and falls
 back to the `codex` executable on `PATH` when Codex.app is unavailable. It owns
@@ -95,7 +152,14 @@ materialization.
 
 ## Server
 
-The server is a Rust control-plane process built with axum, tokio, and sqlx.
+The hosted Server URL for normal use is:
+
+```text
+https://rainchestnut.com/niuma-server
+```
+
+For source development, the server is a Rust control-plane process built with
+axum, tokio, and sqlx.
 
 ```bash
 cd niuma-server
