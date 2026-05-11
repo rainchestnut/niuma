@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
-use tokio::sync::{Mutex, broadcast, oneshot};
+use tokio::sync::{Mutex, broadcast, mpsc, oneshot};
 use tokio::time::{Duration, timeout};
 use tracing::{debug, info, warn};
 
@@ -50,6 +50,7 @@ struct CodexAppServerInner {
     stdin: Mutex<ChildStdin>,
     pending: Arc<Mutex<HashMap<String, oneshot::Sender<PendingResponse>>>>,
     notifications: broadcast::Sender<Value>,
+    requests: Arc<Mutex<mpsc::UnboundedReceiver<Value>>>,
     next_id: AtomicU64,
 }
 
@@ -84,12 +85,14 @@ impl CodexAppServerClient {
         spawn_stderr_logger(stderr);
 
         let (notifications, _) = broadcast::channel(256);
+        let (requests_tx, requests_rx) = mpsc::unbounded_channel();
         let client = Self {
             inner: Arc::new(CodexAppServerInner {
                 child: StdMutex::new(child),
                 stdin: Mutex::new(stdin),
                 pending: Arc::new(Mutex::new(HashMap::new())),
                 notifications,
+                requests: Arc::new(Mutex::new(requests_rx)),
                 next_id: AtomicU64::new(1),
             }),
         };
@@ -97,6 +100,7 @@ impl CodexAppServerClient {
             stdout,
             client.inner.pending.clone(),
             client.inner.notifications.clone(),
+            requests_tx,
         );
         client.initialize().await?;
         let log_path = paths::runtime_dir()?.join("codex_app_server.initialized");
@@ -105,9 +109,14 @@ impl CodexAppServerClient {
         Ok(client)
     }
 
-    /// Subscribe to app-server notifications and requests emitted on stdout.
+    /// Subscribe to app-server notifications emitted on stdout.
     pub fn subscribe_notifications(&self) -> broadcast::Receiver<Value> {
         self.inner.notifications.subscribe()
+    }
+
+    /// Receive the next app-server JSON-RPC request that must be answered.
+    pub async fn recv_request(&self) -> Option<Value> {
+        self.inner.requests.lock().await.recv().await
     }
 
     /// Send a JSON-RPC request and wait for its response.
@@ -405,6 +414,7 @@ fn spawn_stdout_reader(
     stdout: ChildStdout,
     pending: Arc<Mutex<HashMap<String, oneshot::Sender<PendingResponse>>>>,
     notifications: broadcast::Sender<Value>,
+    requests: mpsc::UnboundedSender<Value>,
 ) {
     tokio::spawn(async move {
         let mut lines = BufReader::new(stdout).lines();
@@ -434,14 +444,22 @@ fn spawn_stdout_reader(
                 .get("method")
                 .and_then(|value| value.as_str())
                 .unwrap_or("unknown");
-            info!(
-                method = %method,
-                has_id = payload.get("id").is_some(),
-                payload_bytes = line.len(),
-                "codex_app_server_notification_in"
-            );
-            debug!("codex app-server notification received");
-            let _ = notifications.send(payload);
+            if is_inbound_app_server_request(&payload) {
+                info!(
+                    method = %method,
+                    has_id = true,
+                    payload_bytes = line.len(),
+                    "codex_app_server_request_in"
+                );
+            } else {
+                info!(
+                    method = %method,
+                    has_id = payload.get("id").is_some(),
+                    payload_bytes = line.len(),
+                    "codex_app_server_notification_in"
+                );
+            }
+            route_app_server_event(payload, &notifications, &requests);
         }
 
         let mut pending = pending.lock().await;
@@ -449,6 +467,28 @@ fn spawn_stdout_reader(
             let _ = sender.send(Err("app-server stdout closed".to_string()));
         }
     });
+}
+
+/// Route blocking JSON-RPC requests through a reliable queue; they carry ids
+/// and the app-server waits for a matching response.
+fn route_app_server_event(
+    payload: Value,
+    notifications: &broadcast::Sender<Value>,
+    requests: &mpsc::UnboundedSender<Value>,
+) {
+    if is_inbound_app_server_request(&payload) {
+        debug!("codex app-server request received");
+        if requests.send(payload).is_err() {
+            warn!("codex_app_server_request_queue_closed");
+        }
+        return;
+    }
+    debug!("codex app-server notification received");
+    let _ = notifications.send(payload);
+}
+
+fn is_inbound_app_server_request(payload: &Value) -> bool {
+    payload.get("method").is_some() && payload.get("id").is_some()
 }
 
 fn response_id(payload: &Value) -> Option<String> {
@@ -688,5 +728,48 @@ mod tests {
 
         assert_eq!(params["threadId"], "thread-1");
         assert!(params.get("cwd").is_none());
+    }
+
+    #[test]
+    fn inbound_requests_are_routed_to_reliable_queue() {
+        let (notifications, mut notification_rx) = tokio::sync::broadcast::channel(1);
+        let (requests_tx, mut requests_rx) = tokio::sync::mpsc::unbounded_channel();
+
+        route_app_server_event(
+            json!({
+                "id": "rpc-1",
+                "method": "mcpServer/elicitation/request",
+                "params": {}
+            }),
+            &notifications,
+            &requests_tx,
+        );
+
+        let request = requests_rx
+            .try_recv()
+            .expect("request should be kept in the reliable queue");
+        assert_eq!(request["id"], "rpc-1");
+        assert!(notification_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn plain_notifications_still_use_broadcast_channel() {
+        let (notifications, mut notification_rx) = tokio::sync::broadcast::channel(1);
+        let (requests_tx, mut requests_rx) = tokio::sync::mpsc::unbounded_channel();
+
+        route_app_server_event(
+            json!({
+                "method": "turn/completed",
+                "params": {"threadId": "thread-1"}
+            }),
+            &notifications,
+            &requests_tx,
+        );
+
+        let notification = notification_rx
+            .try_recv()
+            .expect("notification should use the broadcast channel");
+        assert_eq!(notification["method"], "turn/completed");
+        assert!(requests_rx.try_recv().is_err());
     }
 }

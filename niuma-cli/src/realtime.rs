@@ -273,12 +273,18 @@ async fn run_agent_channel(runtime: &AgentChannelRuntime, session_token: &str) -
         status.last_error = None;
     }
     let (mut writer, mut reader) = socket.split();
+    let app_server_requests = runtime.codex_app_server.clone();
     let mut notifications = runtime
         .codex_app_server
         .as_ref()
         .map(CodexAppServerClient::subscribe_notifications);
     loop {
         tokio::select! {
+            request = next_app_server_request(app_server_requests.as_ref()), if app_server_requests.is_some() => {
+                if let Some(request) = request {
+                    handle_app_server_event(&mut writer, runtime, request).await?;
+                }
+            }
             message = reader.next() => {
                 let Some(message) = message else {
                     break;
@@ -292,7 +298,7 @@ async fn run_agent_channel(runtime: &AgentChannelRuntime, session_token: &str) -
             }
             notification = next_notification(&mut notifications), if notifications.is_some() => {
                 if let Some(notification) = notification {
-                    handle_app_server_notification(&mut writer, runtime, notification).await?;
+                    handle_app_server_event(&mut writer, runtime, notification).await?;
                 }
             }
         }
@@ -852,16 +858,16 @@ fn thread_rename_failed_wire(inbound: &ThreadRenameRequest, error: &str) -> Valu
     })
 }
 
-async fn handle_app_server_notification<S, E>(
+async fn handle_app_server_event<S, E>(
     writer: &mut S,
     runtime: &AgentChannelRuntime,
-    notification: Value,
+    event: Value,
 ) -> Result<()>
 where
     S: Sink<Message, Error = E> + Unpin,
     E: std::error::Error + Send + Sync + 'static,
 {
-    if is_app_server_request(&notification) {
+    if is_app_server_request(&event) {
         handle_app_server_request(
             writer,
             runtime.codex_app_server.clone(),
@@ -869,13 +875,13 @@ where
             runtime.active_threads.clone(),
             runtime.pending_approvals.clone(),
             runtime.pending_user_inputs.clone(),
-            notification,
+            event,
         )
         .await?;
         return Ok(());
     }
     for sync in resolved_request_syncs(
-        &notification,
+        &event,
         runtime.pending_approvals.clone(),
         runtime.pending_user_inputs.clone(),
     )
@@ -886,7 +892,7 @@ where
     match notification_metadata_syncs(
         runtime.codex_app_server.as_ref(),
         runtime.active_threads.clone(),
-        &notification,
+        &event,
     )
     .await
     {
@@ -897,7 +903,7 @@ where
         }
         Err(err) => warn!("app-server metadata notification projection failed: {err:#}"),
     }
-    let Some(thread_id) = notification_thread_id(&notification) else {
+    let Some(thread_id) = notification_thread_id(&event) else {
         return Ok(());
     };
     let Some(active) = runtime.active_threads.read().await.get(&thread_id).cloned() else {
@@ -951,7 +957,7 @@ where
         writer,
         &runtime.identity,
         runtime.active_threads.clone(),
-        &notification,
+        &event,
         &device_id,
         &thread_id,
     )
@@ -2564,6 +2570,12 @@ async fn next_notification(
             Err(broadcast::error::RecvError::Closed) => return None,
         }
     }
+}
+
+async fn next_app_server_request(
+    app_server: Option<&CodexAppServerClient>,
+) -> Option<serde_json::Value> {
+    app_server?.recv_request().await
 }
 
 fn notification_thread_id(notification: &serde_json::Value) -> Option<String> {
