@@ -60,13 +60,10 @@ struct HomeView: View {
 
     private var homeHeader: some View {
         HStack(alignment: .center, spacing: 16) {
-            VStack(alignment: .leading, spacing: 4) {
+            VStack(alignment: .leading, spacing: 0) {
                 Text("Niuma")
                     .font(.system(size: 30, weight: .bold))
                     .foregroundStyle(NiumaPalette.ink)
-                Text(appModel.localized("home.subtitle"))
-                    .font(.caption)
-                    .foregroundStyle(NiumaPalette.mutedInk)
             }
 
             Spacer()

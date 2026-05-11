@@ -2105,23 +2105,6 @@
         }
       }
     },
-    "home.subtitle" : {
-      "extractionState" : "stale",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Projects and chats needing attention"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "最近需要处理的项目和对话"
-          }
-        }
-      }
-    },
     "image.attachment" : {
       "extractionState" : "stale",
       "localizations" : {
@@ -2467,13 +2450,13 @@
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "After linking a desktop device running Niuma Gateway, the home screen shows projects and chats needing attention."
+            "value" : "Scan the QR code from a running Niuma Gateway to link this device."
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "绑定已启动 Niuma Gateway 的桌面设备后，首页会展示最近需要处理的项目和对话。"
+            "value" : "扫描运行中的 Niuma Gateway 二维码来绑定此设备。"
           }
         }
       }
