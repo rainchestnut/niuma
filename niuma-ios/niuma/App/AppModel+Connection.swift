@@ -379,6 +379,14 @@ extension AppModel {
             } else {
                 userInputRequests.insert(request, at: 0)
             }
+            if request.status == .resolved || !request.questions.isEmpty {
+                userInputResponseFailures[request.requestID] = nil
+            }
+
+        case .userInputResponseFailed(let failure):
+            updateUserInputStatus(requestID: failure.requestID, status: .failed)
+            userInputResponseFailures[failure.requestID] = failure.error
+            pendingError = failure.error
 
         case .deviceStatus(let agentID, let online):
             guard let index = pairedAgents.firstIndex(where: { $0.agentID == agentID }) else { return }

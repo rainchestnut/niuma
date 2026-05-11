@@ -90,7 +90,7 @@ extension AppModel {
 
     /// Counts pending user-input requests attached to a thread.
     func pendingUserInputCount(for threadID: String) -> Int {
-        userInputRequests.filter { $0.status == .pending && $0.threadID == threadID }.count
+        userInputRequests.filter { $0.threadID == threadID && ($0.status == .pending || $0.status == .failed) }.count
     }
 
     /// Calculates list ordering priority from pending user action state.

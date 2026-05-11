@@ -144,6 +144,8 @@ struct ApprovalResponseInbound {
 
 #[derive(Debug, Deserialize)]
 struct UserInputResponseInbound {
+    #[serde(skip)]
+    device_id: String,
     request_id: String,
     answers: Value,
 }
@@ -1311,21 +1313,40 @@ async fn handle_user_input_response(
     inbound: UserInputResponseInbound,
 ) -> Result<Option<Value>> {
     let Some(app_server) = codex_app_server else {
-        return Ok(None);
+        return Ok(Some(user_input_response_failed(
+            &inbound.device_id,
+            &inbound.request_id,
+            "desktop app-server is not connected",
+        )));
     };
     let Some(pending) = pending_user_inputs
         .write()
         .await
         .remove(&inbound.request_id)
     else {
-        return Ok(None);
+        return Ok(Some(user_input_response_failed(
+            &inbound.device_id,
+            &inbound.request_id,
+            "user input request is no longer pending",
+        )));
     };
-    app_server
+    if let Err(error) = app_server
         .respond(
-            pending.app_server_request_id,
+            pending.app_server_request_id.clone(),
             json!({ "answers": inbound.answers }),
         )
-        .await?;
+        .await
+    {
+        pending_user_inputs
+            .write()
+            .await
+            .insert(pending.request_id.clone(), pending.clone());
+        return Ok(Some(user_input_response_failed(
+            &inbound.device_id,
+            &inbound.request_id,
+            &format!("user input response failed: {error:#}"),
+        )));
+    }
     Ok(Some(user_input_sync(
         &pending.request_id,
         &pending.thread_id,
@@ -1606,6 +1627,15 @@ fn approval_response_failed(device_id: &str, approval_id: &str, error: &str) -> 
         "kind": "approval_response_failed",
         "device_id": device_id,
         "approval_id": approval_id,
+        "error": error,
+    })
+}
+
+fn user_input_response_failed(device_id: &str, request_id: &str, error: &str) -> Value {
+    json!({
+        "kind": "user_input_response_failed",
+        "device_id": device_id,
+        "request_id": request_id,
         "error": error,
     })
 }
@@ -2021,7 +2051,9 @@ fn decrypt_user_input_response(
     ]);
     let plaintext =
         decrypt_from_mobile(identity, &encrypted.device_id, &encrypted.ciphertext, &aad)?;
-    Ok(serde_json::from_slice(&plaintext)?)
+    let mut inbound: UserInputResponseInbound = serde_json::from_slice(&plaintext)?;
+    inbound.device_id = encrypted.device_id;
+    Ok(inbound)
 }
 
 async fn track_wire_message(
@@ -2319,9 +2351,10 @@ mod tests {
 
     use super::{
         ActiveThread, ApprovalResponseInbound, PendingApproval, ThreadArchiveRequest,
-        ThreadRenameRequest, agent_ws_url, claim_task_progress_push, handle_approval_response,
-        task_progress_push_marker, thread_archive_failed_wire, thread_archive_result_wire,
-        thread_rename_failed_wire, thread_rename_result_wire, thread_sync_completed,
+        ThreadRenameRequest, UserInputResponseInbound, agent_ws_url, claim_task_progress_push,
+        handle_approval_response, handle_user_input_response, task_progress_push_marker,
+        thread_archive_failed_wire, thread_archive_result_wire, thread_rename_failed_wire,
+        thread_rename_result_wire, thread_sync_completed,
     };
 
     #[test]
@@ -2564,6 +2597,27 @@ mod tests {
         assert_eq!(response["kind"], "approval_response_failed");
         assert_eq!(response["approval_id"], "approval-1");
         assert!(pending_approvals.read().await.contains_key("approval-1"));
+    }
+
+    #[tokio::test]
+    async fn user_input_response_without_app_server_reports_failure() {
+        let response = handle_user_input_response(
+            None,
+            Arc::new(RwLock::new(HashMap::new())),
+            UserInputResponseInbound {
+                device_id: "ios-device".to_string(),
+                request_id: "input-1".to_string(),
+                answers: json!({}),
+            },
+        )
+        .await
+        .expect("failure event is returned")
+        .expect("failure event is present");
+
+        assert_eq!(response["kind"], "user_input_response_failed");
+        assert_eq!(response["device_id"], "ios-device");
+        assert_eq!(response["request_id"], "input-1");
+        assert_eq!(response["error"], "desktop app-server is not connected");
     }
 }
 

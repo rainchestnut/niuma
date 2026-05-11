@@ -104,6 +104,7 @@ extension AppModel {
                 approvals = []
                 approvalResponseFailures = [:]
                 userInputRequests = []
+                userInputResponseFailures = [:]
                 projects = []
                 threadsByProject = [:]
                 timelines = [:]

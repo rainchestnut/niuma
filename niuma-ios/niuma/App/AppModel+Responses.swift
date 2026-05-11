@@ -40,11 +40,20 @@ extension AppModel {
         approvalResponseFailures[approvalID]
     }
 
+    func userInputFailureMessage(for requestID: String) -> String? {
+        userInputResponseFailures[requestID]
+    }
+
     func respondToUserInput(_ request: UserInputRequestSummary, answers: [String: [String]]) async {
         guard let identity, let selectedAgent else { return }
+        guard currentUserInputRequest(request.requestID)?.status == .pending
+            || currentUserInputRequest(request.requestID)?.status == .failed
+        else { return }
         do {
             let controller = try requireController()
             _ = try await authenticate(identity: identity, agent: selectedAgent)
+            userInputResponseFailures[request.requestID] = nil
+            updateUserInputStatus(requestID: request.requestID, status: .submitting)
             try await controller.respondToUserInput(
                 request: UserInputResponseRequestData(
                     deviceID: identity.deviceID,
@@ -55,12 +64,22 @@ extension AppModel {
                     answers: answers
                 )
             )
-            if let index = userInputRequests.firstIndex(where: { $0.requestID == request.requestID }) {
-                userInputRequests[index].status = .resolved
-            }
         } catch {
+            updateUserInputStatus(requestID: request.requestID, status: .failed)
+            userInputResponseFailures[request.requestID] = error.localizedDescription
             pendingError = error.localizedDescription
         }
+    }
+
+    func currentUserInputRequest(_ requestID: String) -> UserInputRequestSummary? {
+        userInputRequests.first { $0.requestID == requestID }
+    }
+
+    func updateUserInputStatus(requestID: String, status: ApprovalStatus) {
+        guard let index = userInputRequests.firstIndex(where: { $0.requestID == requestID }) else {
+            return
+        }
+        userInputRequests[index].status = status
     }
 
     func dismissError() {

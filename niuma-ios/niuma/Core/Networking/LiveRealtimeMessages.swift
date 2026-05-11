@@ -446,10 +446,12 @@ nonisolated struct UserInputRequestPlaintext: Decodable {
 
 nonisolated struct LiveUserInputResponseMessage: Encodable {
     let kind: String
+    let requestID: String
     let ciphertext: String
 
     enum CodingKeys: String, CodingKey {
         case kind
+        case requestID = "request_id"
         case ciphertext
     }
 }
@@ -463,5 +465,15 @@ nonisolated struct LiveUserInputSyncMessage: Decodable {
         case requestID = "request_id"
         case threadID = "thread_id"
         case status
+    }
+}
+
+nonisolated struct LiveUserInputResponseFailedMessage: Decodable {
+    let requestID: String
+    let error: String
+
+    enum CodingKeys: String, CodingKey {
+        case requestID = "request_id"
+        case error
     }
 }

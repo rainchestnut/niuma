@@ -62,6 +62,12 @@ struct ThreadView: View {
             .sorted { $0.updatedAt < $1.updatedAt }
     }
 
+    private var pendingUserInputs: [UserInputRequestSummary] {
+        appModel.userInputRequests
+            .filter { $0.threadID == thread.threadID && ($0.status == .pending || $0.status == .submitting || $0.status == .failed) }
+            .sorted { $0.updatedAt < $1.updatedAt }
+    }
+
     var body: some View {
         let snapshot = currentRenderSnapshot
         let timelineRows = ThreadTimelineRow.merge(items: snapshot.items, approvals: pendingApprovals)
@@ -71,6 +77,11 @@ struct ThreadView: View {
                     runtimeStrip
 
                     VStack(spacing: 10) {
+                        ForEach(pendingUserInputs) { request in
+                            UserInputPromptRow(request: request)
+                                .id("user-input-\(request.requestID)")
+                        }
+
                         ForEach(timelineRows) { row in
                             switch row {
                             case .processGroup(let group):
@@ -151,6 +162,9 @@ struct ThreadView: View {
             .onChange(of: pendingApprovalIDs) { _, _ in
                 scrollToBottom(using: proxy, animated: true)
             }
+            .onChange(of: pendingUserInputIDs) { _, _ in
+                scrollToBottom(using: proxy, animated: true)
+            }
             .onChange(of: scenePhase) { _, phase in
                 if phase == .active {
                     appModel.enterThreadDetail(thread.threadID)
@@ -167,6 +181,10 @@ struct ThreadView: View {
 
     private var pendingApprovalIDs: [String] {
         pendingApprovals.map(\.approvalID)
+    }
+
+    private var pendingUserInputIDs: [String] {
+        pendingUserInputs.map(\.requestID)
     }
 
     private func pendingApprovalCountText(_ count: Int) -> String {
@@ -276,6 +294,12 @@ struct ThreadView: View {
                 if !pendingApprovals.isEmpty {
                     StatusBadge(
                         title: pendingApprovalCountText(pendingApprovals.count),
+                        tone: .warning
+                    )
+                }
+                if !pendingUserInputs.isEmpty {
+                    StatusBadge(
+                        title: UserInputPromptCopy.text("user_input.needs", language: appModel.appLanguage),
                         tone: .warning
                     )
                 }

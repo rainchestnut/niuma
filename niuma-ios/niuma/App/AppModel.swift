@@ -17,6 +17,7 @@ final class AppModel {
     var approvals: [ApprovalSummary] = []
     var approvalResponseFailures: [String: String] = [:]
     var userInputRequests: [UserInputRequestSummary] = []
+    var userInputResponseFailures: [String: String] = [:]
     var timelines: [String: ThreadTimeline] = [:]
     var threadRefreshStates: [String: ThreadRefreshStatus] = [:]
     var transientOutgoingEntries: [String: [ThreadEntry]] = [:]
@@ -146,7 +147,7 @@ final class AppModel {
     }
 
     var pendingUserInputCount: Int {
-        userInputRequests.filter { $0.status == .pending }.count
+        userInputRequests.filter { $0.status == .pending || $0.status == .failed }.count
     }
 
     var displayedModelID: String {

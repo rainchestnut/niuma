@@ -305,6 +305,7 @@ final class LiveNiumaController: NiumaControlling {
         )
         let payload = LiveUserInputResponseMessage(
             kind: "user_input_response",
+            requestID: request.requestID,
             ciphertext: ciphertext
         )
         try await sendWebSocket(payload)

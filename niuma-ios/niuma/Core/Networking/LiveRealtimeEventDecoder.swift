@@ -298,6 +298,14 @@ enum LiveRealtimeEventDecoder {
                     updatedAt: .now
                 )
             )
+        case "user_input_response_failed":
+            let failure = try decoder.decode(LiveUserInputResponseFailedMessage.self, from: data)
+            return .userInputResponseFailed(
+                UserInputResponseFailure(
+                    requestID: failure.requestID,
+                    error: failure.error
+                )
+            )
         default:
             throw NSError(domain: "NiumaRealtimeError", code: 0, userInfo: [
                 NSLocalizedDescriptionKey: "unsupported realtime event: \(envelope.kind)"

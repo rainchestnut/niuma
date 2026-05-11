@@ -848,9 +848,20 @@ async fn handle_mobile_text(
             .await
         }
         "user_input_response" => {
+            let request_id = payload
+                .get("request_id")
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned);
             payload["device_id"] = json!(query.device_id);
             payload["source"] = json!("mobile");
-            route_to_agent_or_error(state, tx, &query.agent_id, payload, None).await
+            route_user_input_response_to_agent_or_error(
+                state,
+                tx,
+                &query.agent_id,
+                payload,
+                request_id,
+            )
+            .await
         }
         _ => Err(format!("unsupported mobile message kind={kind}")),
     }
@@ -933,6 +944,45 @@ async fn route_approval_response_to_agent_or_error(
             json!({
                 "kind": "approval_response_failed",
                 "approval_id": approval_id.unwrap_or_default(),
+                "error": "desktop agent is offline",
+            }),
+        );
+    }
+    Ok(())
+}
+
+async fn route_user_input_response_to_agent_or_error(
+    state: &AppState,
+    tx: &mpsc::UnboundedSender<Message>,
+    agent_id: &str,
+    payload: Value,
+    request_id: Option<String>,
+) -> Result<(), String> {
+    let device_id = device_id(&payload);
+    let request_id_text = request_id.as_deref().unwrap_or("");
+    tracing::info!(
+        kind = "user_input_response",
+        request_id = %request_id_text,
+        agent_id = %agent_id,
+        device_id = %device_id,
+        "ws_route_to_agent_start"
+    );
+    let delivered = state.hub.send_to_agent(agent_id, payload).await;
+    tracing::info!(
+        kind = "user_input_response",
+        request_id = %request_id_text,
+        agent_id = %agent_id,
+        device_id = %device_id,
+        delivered,
+        "ws_route_to_agent_done"
+    );
+    if !delivered {
+        send_json(
+            tx,
+            json!({
+                "kind": "user_input_response_failed",
+                "request_id": request_id.unwrap_or_default(),
+                "device_id": device_id,
                 "error": "desktop agent is offline",
             }),
         );
@@ -1089,7 +1139,8 @@ async fn handle_agent_text(
         | "thread_rename_failed"
         | "approval_request"
         | "approval_response_failed"
-        | "user_input_request" => {
+        | "user_input_request"
+        | "user_input_response_failed" => {
             deliver_agent_payload_to_mobile(state, agent_id, &kind, payload).await
         }
         "task_progress_push" => handle_task_progress_push(state, agent_id, &payload).await,
@@ -1587,6 +1638,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn mobile_user_input_response_reports_offline_gateway() {
+        let state = test_state();
+        let (mobile_tx, mut mobile_rx) = mpsc::unbounded_channel();
+        let query = MobileWsQuery {
+            device_id: "ios-device".to_string(),
+            agent_id: "agent-offline".to_string(),
+            session_token: "session-token".to_string(),
+        };
+        let request = json!({
+            "kind": "user_input_response",
+            "request_id": "input-1",
+            "ciphertext": "encrypted-payload"
+        });
+
+        handle_mobile_text(&state, &query, &mobile_tx, &request.to_string())
+            .await
+            .expect("offline user-input response reports failure to mobile");
+
+        let routed = recv_json(&mut mobile_rx).await;
+        assert_eq!(routed["kind"], "user_input_response_failed");
+        assert_eq!(routed["device_id"], "ios-device");
+        assert_eq!(routed["request_id"], "input-1");
+        assert_eq!(routed["error"], "desktop agent is offline");
+    }
+
+    #[tokio::test]
     async fn agent_branch_changes_result_routes_to_mobile() {
         assert_agent_branch_changes_routes_to_mobile("branch_changes_result").await;
     }
@@ -1641,6 +1718,36 @@ mod tests {
         assert_eq!(routed["device_id"], "ios-device");
         assert_eq!(routed["approval_id"], "approval-1");
         assert_eq!(routed["error"], "approval request is no longer pending");
+        assert_eq!(routed["source"], "agent");
+        assert_eq!(routed["agent_id"], "agent-1");
+        assert!(agent_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn agent_user_input_response_failed_routes_to_mobile() {
+        let state = test_state();
+        let (mobile_tx, mut mobile_rx) = mpsc::unbounded_channel();
+        state
+            .hub
+            .connect_mobile("ios-device", "agent-1", mobile_tx)
+            .await;
+        let (agent_tx, mut agent_rx) = mpsc::unbounded_channel();
+        let response = json!({
+            "kind": "user_input_response_failed",
+            "device_id": "ios-device",
+            "request_id": "input-1",
+            "error": "user input request is no longer pending"
+        });
+
+        handle_agent_text(&state, "agent-1", &agent_tx, &response.to_string())
+            .await
+            .expect("route user-input response failure");
+
+        let routed = recv_json(&mut mobile_rx).await;
+        assert_eq!(routed["kind"], "user_input_response_failed");
+        assert_eq!(routed["device_id"], "ios-device");
+        assert_eq!(routed["request_id"], "input-1");
+        assert_eq!(routed["error"], "user input request is no longer pending");
         assert_eq!(routed["source"], "agent");
         assert_eq!(routed["agent_id"], "agent-1");
         assert!(agent_rx.try_recv().is_err());

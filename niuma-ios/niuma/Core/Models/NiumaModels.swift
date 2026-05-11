@@ -121,7 +121,9 @@ nonisolated enum ThreadStatus: String, Codable, CaseIterable {
 
 nonisolated enum ApprovalStatus: String, Codable {
     case pending
+    case submitting
     case resolved
+    case failed
 }
 
 nonisolated enum ThreadEntryRole: String, Codable {
@@ -630,6 +632,11 @@ nonisolated struct ApprovalResponseFailure: Hashable {
     let error: String
 }
 
+nonisolated struct UserInputResponseFailure: Hashable {
+    let requestID: String
+    let error: String
+}
+
 nonisolated enum RealtimeEvent: Hashable {
     case projectSync(ProjectSummary)
     case threadSync(ThreadSummary)
@@ -645,6 +652,7 @@ nonisolated enum RealtimeEvent: Hashable {
     case approvalRequest(ApprovalSummary)
     case approvalResponseFailed(ApprovalResponseFailure)
     case userInputRequest(UserInputRequestSummary)
+    case userInputResponseFailed(UserInputResponseFailure)
     case deviceStatus(agentID: String, online: Bool)
 }
 
