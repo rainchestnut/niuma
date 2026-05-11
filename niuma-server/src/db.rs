@@ -668,6 +668,34 @@ pub async fn revoke_pairing(
     Ok(result.rows_affected() > 0)
 }
 
+pub async fn revoke_agent_pair_binding(
+    pool: &PgPool,
+    binding_id: &str,
+    agent_id: &str,
+) -> Result<Option<bool>, sqlx::Error> {
+    let result = sqlx::query(
+        "UPDATE pair_bindings SET status='revoked', revoked_at=$1 WHERE binding_id=$2 AND agent_id=$3 AND status='active'",
+    )
+    .bind(Utc::now())
+    .bind(binding_id)
+    .bind(agent_id)
+    .execute(pool)
+    .await?;
+    if result.rows_affected() > 0 {
+        return Ok(Some(true));
+    }
+
+    let exists = sqlx::query(
+        "SELECT binding_id FROM pair_bindings WHERE binding_id=$1 AND agent_id=$2 LIMIT 1",
+    )
+    .bind(binding_id)
+    .bind(agent_id)
+    .fetch_optional(pool)
+    .await?
+    .is_some();
+    Ok(exists.then_some(false))
+}
+
 pub async fn is_paired(
     pool: &PgPool,
     device_id: &str,

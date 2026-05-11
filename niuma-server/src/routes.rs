@@ -9,7 +9,7 @@ use axum::{
     },
     http::{HeaderMap, StatusCode, header},
     response::{IntoResponse, Response},
-    routing::{get, post, put},
+    routing::{delete, get, post, put},
 };
 use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
@@ -24,10 +24,11 @@ use crate::{
     error::ApiError,
     models::{
         ChallengeRequest, ChallengeResponse, DeviceRegisterRequest, DeviceRegisterResponse,
-        HealthResponse, PairConfirmRequest, PairConfirmResponse, PairRequest, PairRequestResponse,
-        PairRevokeRequest, PairRevokeResponse, PushTokenUpdateRequest, PushTokenUpdateResponse,
-        TransferAckRequest, TransferAckResponse, TransferEnsureRequest, TransferEnsureResponse,
-        TransferUploadResponse, VerifyRequest, VerifyResponse,
+        HealthResponse, PairBindingRevokeResponse, PairConfirmRequest, PairConfirmResponse,
+        PairRequest, PairRequestResponse, PairRevokeRequest, PairRevokeResponse,
+        PushTokenUpdateRequest, PushTokenUpdateResponse, TransferAckRequest, TransferAckResponse,
+        TransferEnsureRequest, TransferEnsureResponse, TransferUploadResponse, VerifyRequest,
+        VerifyResponse,
     },
     transfer::TransferManifest,
 };
@@ -42,6 +43,7 @@ pub fn router(max_transfer_bytes: usize) -> Router<AppState> {
         .route("/pair/request", post(pair_request))
         .route("/pair/confirm", post(pair_confirm))
         .route("/pair/revoke", post(pair_revoke))
+        .route("/pair-bindings/{binding_id}", delete(revoke_pair_binding))
         .route("/devices/push-token", post(update_push_token))
         .route("/transfers/{transfer_id}/ensure", post(ensure_transfer))
         .route(
@@ -296,6 +298,33 @@ async fn pair_revoke(
         "http_pair_revoke_out"
     );
     Ok(Json(PairRevokeResponse { revoked }))
+}
+
+async fn revoke_pair_binding(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(binding_id): Path<String>,
+) -> Result<Json<PairBindingRevokeResponse>, ApiError> {
+    let agent_id = required_header(&headers, "X-Agent-ID")?;
+    tracing::info!(
+        agent_id = %agent_id,
+        binding_id = %binding_id,
+        "http_pair_binding_revoke_in"
+    );
+    db::require_session(&state.pool, session_token(&headers), agent_id).await?;
+    let revoked = db::revoke_agent_pair_binding(&state.pool, &binding_id, agent_id)
+        .await?
+        .ok_or_else(|| ApiError::NotFound("pair binding not found".to_string()))?;
+    tracing::info!(
+        agent_id = %agent_id,
+        binding_id = %binding_id,
+        revoked,
+        "http_pair_binding_revoke_out"
+    );
+    Ok(Json(PairBindingRevokeResponse {
+        binding_id,
+        revoked,
+    }))
 }
 
 async fn update_push_token(

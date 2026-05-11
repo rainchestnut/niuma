@@ -7,36 +7,43 @@
   <link rel="stylesheet" href="/static/dashboard.css" />
 </head>
 <body>
-  <header>
+  <header class="app-header">
     <div class="header-inner">
       <div>
         <h1>Niuma Gateway</h1>
-        <div class="muted small mono" id="dashboard-url">__DASHBOARD_URL__</div>
+        <p>桌面控制台</p>
       </div>
       <span id="gateway-mode" class="pill">loading</span>
     </div>
   </header>
-  <main>
-    <div class="stack">
-      <section>
+
+  <main class="dashboard">
+    <div class="left-column">
+      <section class="panel pairing-panel">
         <div class="panel-head">
-          <h2>二维码配对</h2>
+          <div>
+            <h2>二维码配对</h2>
+            <p>用移动端扫描当前二维码完成绑定。</p>
+          </div>
           <span id="pairing-state" class="pill">loading</span>
         </div>
         <img id="qr" class="qr" alt="Niuma pairing QR" src="/api/pairing/qr.svg" />
         <div class="actions">
           <button id="refresh" class="primary">刷新二维码</button>
         </div>
-        <div class="rows pairing-meta">
-          <div class="row"><span class="muted">过期时间</span><span id="pair-expiry">-</span></div>
-          <div class="row"><span class="muted">桌面设备</span><span id="device-name">-</span></div>
-          <div class="row"><span class="muted">Agent ID</span><span id="agent-id" class="mono">-</span></div>
-        </div>
+        <dl class="meta-list">
+          <div><dt>过期时间</dt><dd id="pair-expiry">-</dd></div>
+          <div><dt>桌面设备</dt><dd id="device-name">-</dd></div>
+          <div><dt>Agent ID</dt><dd id="agent-id" class="mono">-</dd></div>
+        </dl>
       </section>
 
-      <section>
+      <section class="panel">
         <div class="panel-head">
-          <h2>Server 配置</h2>
+          <div>
+            <h2>Server 配置</h2>
+            <p>修改保存后需要重启 Gateway 生效。</p>
+          </div>
           <span id="server-source" class="pill">-</span>
         </div>
         <label>
@@ -48,56 +55,60 @@
           <button id="save-server" class="primary">保存配置</button>
         </div>
         <div id="config-message" class="notice">-</div>
-        <div class="rows compact-rows config-meta">
-          <div class="row"><span class="muted">当前生效</span><span id="active-server-url" class="mono">-</span></div>
-          <div class="row"><span class="muted">配置文件</span><span id="config-path" class="mono">-</span></div>
-          <div class="row"><span class="muted">已保存 URL</span><span id="saved-server-url" class="mono">-</span></div>
-        </div>
+        <dl class="meta-list compact">
+          <div><dt>当前生效</dt><dd id="active-server-url" class="mono">-</dd></div>
+          <div><dt>配置文件</dt><dd id="config-path" class="mono">-</dd></div>
+          <div><dt>已保存 URL</dt><dd id="saved-server-url" class="mono">-</dd></div>
+        </dl>
       </section>
     </div>
 
-    <div class="stack">
-      <section>
+    <div class="right-column">
+      <section class="panel">
         <div class="panel-head">
-          <h2>运行状态</h2>
+          <div>
+            <h2>运行状态</h2>
+            <p>Gateway 与服务端、Codex app-server 的实时连接状态。</p>
+          </div>
           <span id="server-state" class="pill">loading</span>
         </div>
-        <div class="grid">
-          <div class="metric"><h3>Server</h3><strong id="metric-server">-</strong></div>
-          <div class="metric"><h3>认证</h3><strong id="metric-auth">-</strong></div>
-          <div class="metric"><h3>Agent WebSocket</h3><strong id="metric-ws">-</strong></div>
-          <div class="metric"><h3>Codex app-server</h3><strong id="metric-codex">-</strong></div>
+        <div class="status-grid">
+          <div><span>Server</span><strong id="metric-server">-</strong></div>
+          <div><span>认证</span><strong id="metric-auth">-</strong></div>
+          <div><span>Agent WebSocket</span><strong id="metric-ws">-</strong></div>
+          <div><span>Codex app-server</span><strong id="metric-codex">-</strong></div>
         </div>
-        <div class="rows runtime-meta">
-          <div class="row"><span class="muted">启动时间</span><span id="started-at">-</span></div>
-          <div class="row"><span class="muted">状态目录</span><span id="state-root" class="mono">-</span></div>
-          <div class="row"><span class="muted">最近 WS 错误</span><span id="ws-error">-</span></div>
-        </div>
+        <dl class="meta-list inline">
+          <div><dt>启动时间</dt><dd id="started-at">-</dd></div>
+          <div><dt>状态目录</dt><dd id="state-root" class="mono">-</dd></div>
+          <div><dt>最近 WS 错误</dt><dd id="ws-error">-</dd></div>
+        </dl>
       </section>
 
-      <section>
+      <section class="panel pairings-panel">
         <div class="panel-head">
-          <h2>已配对设备</h2>
+          <div>
+            <h2>已配对设备</h2>
+            <p>删除会先撤销服务端绑定，成功后再删除本地记录。</p>
+          </div>
           <span id="pairing-count" class="pill">0</span>
         </div>
-        <table>
-          <thead>
-            <tr>
-              <th>Device ID</th>
-              <th>Binding ID</th>
-              <th>配对时间</th>
-            </tr>
-          </thead>
-          <tbody id="pairings">
-            <tr><td colspan="3" class="muted">loading...</td></tr>
-          </tbody>
-        </table>
+        <div id="pairing-message" class="notice quiet">-</div>
+        <div class="pairing-table-head">
+          <span>设备</span>
+          <span>Binding ID</span>
+          <span>配对时间</span>
+          <span>操作</span>
+        </div>
+        <div id="pairings" class="pairing-list">
+          <div class="empty-state">loading...</div>
+        </div>
       </section>
 
-      <section>
+      <section class="panel diagnostics-panel">
         <details>
           <summary>诊断详情</summary>
-          <h3 class="diagnostic-title">状态 JSON</h3>
+          <h3>状态 JSON</h3>
           <pre id="status">loading...</pre>
           <h3>配对 Payload</h3>
           <pre id="payload">loading...</pre>

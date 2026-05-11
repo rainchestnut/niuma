@@ -34,12 +34,20 @@ impl BindingFile {
         self.bindings.insert(binding.binding_id.clone(), binding);
     }
 
+    fn binding_by_id(&self, binding_id: &str) -> Option<PairedDeviceBinding> {
+        self.bindings.get(binding_id).cloned()
+    }
+
     fn newest_for_device(&self, device_id: &str) -> Option<PairedDeviceBinding> {
         self.bindings
             .values()
             .filter(|binding| binding.device_id == device_id)
             .max_by_key(|binding| binding.paired_at)
             .cloned()
+    }
+
+    fn remove_binding(&mut self, binding_id: &str) -> Option<PairedDeviceBinding> {
+        self.bindings.remove(binding_id)
     }
 }
 
@@ -58,6 +66,13 @@ pub fn binding_for_device(device_id: &str) -> Result<Option<PairedDeviceBinding>
     Ok(file.newest_for_device(device_id))
 }
 
+/// Find one local binding by its stable server-issued binding id.
+pub fn binding_for_id(binding_id: &str) -> Result<Option<PairedDeviceBinding>> {
+    let path = bindings_path()?;
+    let file = read_bindings(&path)?;
+    Ok(file.binding_by_id(binding_id))
+}
+
 /// List locally known mobile bindings for dashboard diagnostics.
 pub fn list_bindings() -> Result<Vec<PairedDeviceBinding>> {
     let path = bindings_path()?;
@@ -65,6 +80,17 @@ pub fn list_bindings() -> Result<Vec<PairedDeviceBinding>> {
     let mut bindings = file.bindings.values().cloned().collect::<Vec<_>>();
     bindings.sort_by(|left, right| right.paired_at.cmp(&left.paired_at));
     Ok(bindings)
+}
+
+/// Remove a local dashboard binding after niuma-server has accepted revocation.
+pub fn delete_binding(binding_id: &str) -> Result<Option<PairedDeviceBinding>> {
+    let path = bindings_path()?;
+    let mut file = read_bindings(&path)?;
+    let removed = file.remove_binding(binding_id);
+    if removed.is_some() {
+        write_bindings(&path, &file)?;
+    }
+    Ok(removed)
 }
 
 fn read_bindings(path: &PathBuf) -> Result<BindingFile> {
@@ -138,6 +164,22 @@ mod tests {
                 .binding_id,
             "new"
         );
+    }
+
+    #[test]
+    fn remove_binding_deletes_only_requested_binding() {
+        let mut file = BindingFile::default();
+        file.upsert(binding("target", "ios-1", "agent-1", 10));
+        file.upsert(binding("other", "ios-2", "agent-1", 20));
+
+        let removed = file
+            .remove_binding("target")
+            .expect("target binding should be removed");
+
+        assert_eq!(removed.binding_id, "target");
+        assert!(!file.bindings.contains_key("target"));
+        assert!(file.bindings.contains_key("other"));
+        assert!(file.remove_binding("missing").is_none());
     }
 
     fn binding(

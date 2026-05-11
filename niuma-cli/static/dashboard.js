@@ -1,5 +1,7 @@
 const serverInput = document.getElementById("server-url");
 const configMessage = document.getElementById("config-message");
+const pairingMessage = document.getElementById("pairing-message");
+const pairingsElement = document.getElementById("pairings");
 
 async function fetchText(path, options = {}) {
   const response = await fetch(path, { cache: "no-store", ...options });
@@ -30,6 +32,12 @@ function formatTime(timestamp) {
   return new Date(timestamp * 1000).toLocaleString();
 }
 
+function compactDeviceName(deviceID) {
+  const text = String(deviceID || "");
+  if (text.startsWith("ios-")) return "iOS 设备";
+  return text || "未知设备";
+}
+
 function setText(id, value) {
   document.getElementById(id).textContent = value ?? "-";
 }
@@ -43,6 +51,11 @@ function setPill(id, ok, text) {
 function setNotice(text, tone = "") {
   configMessage.className = `notice ${tone}`;
   configMessage.textContent = text;
+}
+
+function setPairingNotice(text, tone = "") {
+  pairingMessage.className = text ? `notice ${tone}` : "notice quiet";
+  pairingMessage.textContent = text || "-";
 }
 
 function renderStatus(status) {
@@ -79,17 +92,24 @@ function renderStatus(status) {
 
 function renderPairings(devices) {
   setText("pairing-count", String(devices.length));
-  const body = document.getElementById("pairings");
   if (!devices.length) {
-    body.innerHTML = `<tr><td colspan="3" class="muted">暂无本地配对记录</td></tr>`;
+    pairingsElement.innerHTML = `<div class="empty-state">暂无本地配对记录</div>`;
     return;
   }
-  body.innerHTML = devices.map((device) => `
-    <tr>
-      <td class="mono">${escapeHTML(device.device_id)}</td>
-      <td class="mono">${escapeHTML(device.binding_id)}</td>
-      <td>${formatTime(device.paired_at)}</td>
-    </tr>
+  pairingsElement.innerHTML = devices.map((device) => `
+    <div class="pairing-row">
+      <div class="pairing-device">
+        <strong>${escapeHTML(compactDeviceName(device.device_id))}</strong>
+        <span class="mono">${escapeHTML(device.device_id)}</span>
+      </div>
+      <div class="pairing-binding mono">${escapeHTML(device.binding_id)}</div>
+      <div class="pairing-time">${formatTime(device.paired_at)}</div>
+      <button
+        class="danger"
+        data-delete-pairing="${escapeHTML(device.binding_id)}"
+        data-device-id="${escapeHTML(device.device_id)}"
+      >删除</button>
+    </div>
   `).join("");
 }
 
@@ -130,6 +150,24 @@ async function withButton(button, task) {
   }
 }
 
+async function deletePairing(button) {
+  const bindingID = button.dataset.deletePairing;
+  const deviceID = button.dataset.deviceId;
+  if (!bindingID) return;
+  const confirmed = window.confirm(`删除 ${deviceID} 的配对绑定？`);
+  if (!confirmed) return;
+  await withButton(button, async () => {
+    setPairingNotice("正在撤销服务端绑定...");
+    const result = await fetchJSON(`/api/pairings/${encodeURIComponent(bindingID)}`, {
+      method: "DELETE",
+    });
+    const serverText = result.server_revoked ? "服务端已撤销" : "服务端已无 active 绑定";
+    const localText = result.local_removed ? "本地记录已删除" : "本地记录不存在";
+    setPairingNotice(`${serverText}，${localText}。`, "ok");
+    await refresh(false);
+  });
+}
+
 serverInput.addEventListener("input", () => {
   serverInput.dataset.dirty = "true";
   configMessage.dataset.locked = "";
@@ -167,6 +205,12 @@ document.getElementById("save-server").addEventListener("click", (event) => {
     setNotice(`已保存，重启 Gateway 后生效。${override}`, "ok");
     await refresh(false);
   }).catch((error) => setNotice(error.message, "bad"));
+});
+
+pairingsElement.addEventListener("click", (event) => {
+  const button = event.target.closest("[data-delete-pairing]");
+  if (!button) return;
+  deletePairing(button).catch((error) => setPairingNotice(error.message, "bad"));
 });
 
 refresh(false);

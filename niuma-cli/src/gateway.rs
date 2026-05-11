@@ -4,10 +4,10 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
-use axum::extract::State;
+use axum::extract::{Path, State};
 use axum::http::{StatusCode, header};
 use axum::response::{Html, IntoResponse};
-use axum::routing::{get, post, put};
+use axum::routing::{delete, get, post, put};
 use axum::{Json, Router};
 use qrcode::QrCode;
 use qrcode::render::svg;
@@ -92,6 +92,14 @@ struct ServerUrlUpdateResponse {
 struct ServerUrlTestResponse {
     server_url: String,
     reachable: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct PairingDeleteResponse {
+    binding_id: String,
+    device_id: String,
+    server_revoked: bool,
+    local_removed: bool,
 }
 
 /// Run the local gateway HTTP service and pairing token maintenance loop.
@@ -190,6 +198,7 @@ fn dashboard_router(state: GatewayState) -> Router {
         .route("/api/config/server-url", put(update_server_url))
         .route("/api/config/server-url/test", post(test_server_url))
         .route("/api/pairings", get(paired_devices))
+        .route("/api/pairings/{binding_id}", delete(delete_pairing))
         .route("/api/pairing/payload", get(pairing_payload))
         .route("/api/pairing/qr.svg", get(pairing_qr_svg))
         .route("/api/pairing/refresh", post(refresh_pairing_payload))
@@ -214,8 +223,8 @@ fn spawn_pairing_refresh(state: GatewayState) {
     });
 }
 
-async fn index(State(state): State<GatewayState>) -> Html<String> {
-    Html(render_index(&dashboard_url(&state.config)))
+async fn index() -> Html<&'static str> {
+    Html(include_str!("../static/dashboard.html"))
 }
 
 async fn dashboard_css() -> impl IntoResponse {
@@ -287,6 +296,53 @@ async fn paired_devices() -> Result<Json<Vec<PairedDeviceBinding>>, (StatusCode,
     bindings::list_bindings()
         .map(Json)
         .map_err(|err| api_error(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()))
+}
+
+async fn delete_pairing(
+    State(state): State<GatewayState>,
+    Path(binding_id): Path<String>,
+) -> Result<Json<PairingDeleteResponse>, (StatusCode, Json<ApiError>)> {
+    let binding = bindings::binding_for_id(&binding_id)
+        .map_err(|err| api_error(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()))?
+        .ok_or_else(|| api_error(StatusCode::NOT_FOUND, "local binding not found".to_string()))?;
+    if binding.agent_id != state.identity.agent_id {
+        return Err(api_error(
+            StatusCode::CONFLICT,
+            "binding belongs to a different desktop agent".to_string(),
+        ));
+    }
+    let server = state.server.as_ref().ok_or_else(|| {
+        api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "server connection is unavailable; local binding was not removed".to_string(),
+        )
+    })?;
+    let session_token = state.session_token.as_ref().ok_or_else(|| {
+        api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "agent session is unavailable; local binding was not removed".to_string(),
+        )
+    })?;
+    let token = session_token.read().await.clone();
+    let revoke = server
+        .revoke_pair_binding(&binding.binding_id, &binding.agent_id, &token)
+        .await
+        .map_err(|err| api_error(StatusCode::BAD_GATEWAY, err.to_string()))?;
+    if revoke.binding_id != binding.binding_id {
+        return Err(api_error(
+            StatusCode::BAD_GATEWAY,
+            "server returned a mismatched binding id".to_string(),
+        ));
+    }
+    let removed = bindings::delete_binding(&binding.binding_id)
+        .map_err(|err| api_error(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()))?
+        .is_some();
+    Ok(Json(PairingDeleteResponse {
+        binding_id: revoke.binding_id,
+        device_id: binding.device_id,
+        server_revoked: revoke.revoked,
+        local_removed: removed,
+    }))
 }
 
 async fn pairing_payload(
@@ -473,10 +529,6 @@ fn active_server_url(state: &GatewayState) -> String {
         .unwrap_or_else(|| state.config.server_url.clone())
 }
 
-fn render_index(dashboard_url: &str) -> String {
-    include_str!("../static/dashboard.html").replace("__DASHBOARD_URL__", dashboard_url)
-}
-
 fn dashboard_url(config: &GatewayConfig) -> String {
     format!("http://{}:{}", config.dashboard_host, config.dashboard_port)
 }
@@ -508,7 +560,11 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::{Mutex, MutexGuard, OnceLock};
 
-    use axum::routing::get;
+    use axum::{
+        extract::Path,
+        http::HeaderMap,
+        routing::{delete, get},
+    };
     use serde_json::json;
     use tokio::task::JoinHandle;
     use uuid::Uuid;
@@ -628,13 +684,85 @@ mod tests {
         let _ = std::fs::remove_dir_all(home);
     }
 
+    #[tokio::test]
+    async fn delete_pairing_revokes_server_before_removing_local_binding() {
+        let home = temp_home("delete-pairing");
+        let _home = HomeOverride::new(&home);
+        bindings::save_binding(PairedDeviceBinding {
+            binding_id: "binding-delete".to_string(),
+            device_id: "ios-delete".to_string(),
+            agent_id: "agent_test".to_string(),
+            ios_encryption_public_key: "x25519:test".to_string(),
+            paired_at: 1_700_000_001,
+        })
+        .expect("seed local binding");
+
+        let revoke_listener = TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("revoke listener");
+        let revoke_addr = revoke_listener.local_addr().expect("revoke addr");
+        let revoke_task = tokio::spawn(async move {
+            let app = Router::new().route(
+                "/pair-bindings/{binding_id}",
+                delete(
+                    |Path(binding_id): Path<String>, headers: HeaderMap| async move {
+                        let token = headers
+                            .get("X-Session-Token")
+                            .and_then(|value| value.to_str().ok());
+                        let agent_id = headers
+                            .get("X-Agent-ID")
+                            .and_then(|value| value.to_str().ok());
+                        if binding_id != "binding-delete"
+                            || token != Some("session-token")
+                            || agent_id != Some("agent_test")
+                        {
+                            return StatusCode::UNAUTHORIZED.into_response();
+                        }
+                        Json(json!({
+                            "binding_id": binding_id,
+                            "revoked": true
+                        }))
+                        .into_response()
+                    },
+                ),
+            );
+            axum::serve(revoke_listener, app)
+                .await
+                .expect("revoke server");
+        });
+        let state = test_state_with_server(&format!("http://{revoke_addr}"), "session-token");
+        let (dashboard_url, dashboard_task) = spawn_dashboard_with_state(state).await;
+
+        let response = reqwest::Client::new()
+            .delete(format!("{dashboard_url}/api/pairings/binding-delete"))
+            .send()
+            .await
+            .expect("delete request");
+
+        assert!(response.status().is_success());
+        let body: serde_json::Value = response.json().await.expect("json response");
+        assert_eq!(body["binding_id"], "binding-delete");
+        assert_eq!(body["device_id"], "ios-delete");
+        assert_eq!(body["server_revoked"], true);
+        assert_eq!(body["local_removed"], true);
+        assert!(bindings::list_bindings().expect("list bindings").is_empty());
+
+        dashboard_task.abort();
+        revoke_task.abort();
+        let _ = std::fs::remove_dir_all(home);
+    }
+
     async fn spawn_dashboard() -> (String, JoinHandle<()>) {
+        spawn_dashboard_with_state(test_state()).await
+    }
+
+    async fn spawn_dashboard_with_state(state: GatewayState) -> (String, JoinHandle<()>) {
         let listener = TcpListener::bind(("127.0.0.1", 0))
             .await
             .expect("dashboard listener");
         let addr = listener.local_addr().expect("dashboard addr");
         let task = tokio::spawn(async move {
-            axum::serve(listener, dashboard_router(test_state()))
+            axum::serve(listener, dashboard_router(state))
                 .await
                 .expect("dashboard server");
         });
@@ -680,6 +808,14 @@ mod tests {
             agent_channel: Arc::new(RwLock::new(AgentChannelStatus::default())),
             started_at: 1_700_000_000,
         }
+    }
+
+    fn test_state_with_server(server_url: &str, session_token: &str) -> GatewayState {
+        let mut state = test_state();
+        state.config.pairing_page_only = false;
+        state.server = Some(NiumaServerClient::new(server_url).expect("server URL"));
+        state.session_token = Some(Arc::new(RwLock::new(session_token.to_string())));
+        state
     }
 
     fn temp_home(label: &str) -> PathBuf {

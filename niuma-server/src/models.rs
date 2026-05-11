@@ -91,6 +91,12 @@ pub struct PairRevokeResponse {
     pub revoked: bool,
 }
 
+#[derive(Debug, Serialize)]
+pub struct PairBindingRevokeResponse {
+    pub binding_id: String,
+    pub revoked: bool,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct PushTokenUpdateRequest {
     pub device_id: String,

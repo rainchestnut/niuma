@@ -6,7 +6,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result};
 use reqwest::{Client, Response, StatusCode};
 use serde::{Deserialize, Serialize};
-use url::Url;
+use url::{Url, form_urlencoded};
 
 use crate::{crypto, identity::AgentIdentity};
 
@@ -78,6 +78,12 @@ pub struct TransferUploadResponse {
 #[derive(Debug, Clone, Deserialize)]
 pub struct TransferAckResponse {
     pub acknowledged: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct PairBindingRevokeResponse {
+    pub binding_id: String,
+    pub revoked: bool,
 }
 
 impl NiumaServerClient {
@@ -289,6 +295,29 @@ impl NiumaServerClient {
             .send()
             .await?;
         ensure_success(response.status(), "/transfers/{transfer_id}/ack").await?;
+        Ok(response.json().await?)
+    }
+
+    /// Revoke one mobile binding that belongs to this authenticated desktop agent.
+    pub async fn revoke_pair_binding(
+        &self,
+        binding_id: &str,
+        agent_id: &str,
+        session_token: &str,
+    ) -> Result<PairBindingRevokeResponse> {
+        let encoded_binding_id =
+            form_urlencoded::byte_serialize(binding_id.as_bytes()).collect::<String>();
+        let response = self
+            .client
+            .delete(self.url(&format!("/pair-bindings/{encoded_binding_id}"))?)
+            .header("X-Session-Token", session_token)
+            .header("X-Agent-ID", agent_id)
+            .send()
+            .await?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(http_status_error(response, "DELETE /pair-bindings/{binding_id}").await);
+        }
         Ok(response.json().await?)
     }
 
