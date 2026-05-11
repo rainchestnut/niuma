@@ -9,6 +9,7 @@ struct ThreadComposerBar: View {
 
     let placeholder: String
     let attachments: [OutgoingAttachment]
+    let currentBranch: String?
     let isSending: Bool
     let isPromptFocused: FocusState<Bool>.Binding
     let onPickPhotoOrVideo: () -> Void
@@ -36,6 +37,9 @@ struct ThreadComposerBar: View {
         VStack(spacing: 0) {
             VStack(spacing: 8) {
                 HStack(spacing: 8) {
+                    if let currentBranch {
+                        ComposerBranchPill(branch: currentBranch)
+                    }
                     if appModel.availableModels.isEmpty {
                         ComposerPill(title: appModel.displayedModelID)
                     } else {
@@ -495,6 +499,39 @@ struct ComposerPill: View {
             .padding(.horizontal, 10)
             .padding(.vertical, 6)
             .background(Capsule().fill(NiumaPalette.raisedCard))
+    }
+}
+
+private struct ComposerBranchPill: View {
+    @Environment(AppModel.self) private var appModel
+    @State private var isShowingFullBranch = false
+
+    let branch: String
+
+    var body: some View {
+        Button {
+            isShowingFullBranch = true
+        } label: {
+            HStack(spacing: 6) {
+                Image(systemName: "arrow.triangle.branch")
+                Text(branch)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Image(systemName: "info.circle")
+            }
+            .font(.caption2.weight(.semibold))
+            .foregroundStyle(NiumaPalette.mutedInk)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .frame(maxWidth: 132, alignment: .leading)
+            .background(Capsule().fill(NiumaPalette.raisedCard))
+        }
+        .buttonStyle(.plain)
+        .alert(branch, isPresented: $isShowingFullBranch) {
+            Button(appModel.localized("common.ok"), role: .cancel) {}
+        }
+        .accessibilityLabel(branch)
+        .accessibilityIdentifier("thread-current-branch-pill")
     }
 }
 
