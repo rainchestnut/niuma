@@ -43,6 +43,17 @@ niuma service status
 桌面 Gateway 需要 Codex.app，或者需要 `PATH` 上有可用的 `codex` 可执行文件，
 以便启动 `codex app-server`。
 
+## App 预览
+
+下面的截图按移动端常用路径排列：先和桌面 Gateway 配对，再查看已连接设备和
+工作区，进入项目 session 列表，继续 Codex thread，并查看文件变更详情。
+
+| 和桌面 Gateway 配对 | 查看设备和项目 | 进入项目 session |
+| --- | --- | --- |
+| <img src="docs/preview/IMG_1290.PNG" alt="Niuma 配对页面" width="220"> | <img src="docs/preview/IMG_1289.PNG" alt="Niuma 首页" width="220"> | <img src="docs/preview/IMG_1286.PNG" alt="Niuma 项目 session 列表" width="220"> |
+| 继续 Codex thread | 查看文件变更详情 | |
+| <img src="docs/preview/IMG_1287.PNG" alt="Niuma thread 详情" width="220"> | <img src="docs/preview/IMG_1288.PNG" alt="Niuma 文件变更详情" width="220"> | |
+
 ## 架构概览
 
 ![Niuma 架构概览](design/image.png)

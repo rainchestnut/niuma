@@ -45,6 +45,19 @@ niuma service status
 The desktop gateway expects Codex.app or a `codex` executable on `PATH` so it
 can start `codex app-server`.
 
+## App Preview
+
+The screenshots below follow the normal mobile flow: pair with the desktop
+gateway, review connected devices and workspaces, open a project session list,
+continue a Codex thread, and inspect file-change details. The current preview
+uses the app's Chinese localization.
+
+| Pair with the desktop gateway | Review devices and projects | Open workspace sessions |
+| --- | --- | --- |
+| <img src="docs/preview/IMG_1290.PNG" alt="Niuma pairing screen" width="220"> | <img src="docs/preview/IMG_1289.PNG" alt="Niuma home dashboard" width="220"> | <img src="docs/preview/IMG_1286.PNG" alt="Niuma workspace session list" width="220"> |
+| Continue a Codex thread | Inspect file-change details | |
+| <img src="docs/preview/IMG_1287.PNG" alt="Niuma thread timeline" width="220"> | <img src="docs/preview/IMG_1288.PNG" alt="Niuma file-change detail view" width="220"> | |
+
 ## Architecture
 
 ![Niuma architecture overview](design/image.png)
