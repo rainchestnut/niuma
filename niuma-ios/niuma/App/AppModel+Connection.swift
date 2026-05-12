@@ -365,21 +365,22 @@ extension AppModel {
             pendingError = failure.error
 
         case .userInputRequest(let request):
-            runtimeState = .waitingApproval
+            let currentStatus: ApprovalStatus
             if let index = userInputRequests.firstIndex(where: { $0.requestID == request.requestID }) {
-                let questions = request.questions.isEmpty ? userInputRequests[index].questions : request.questions
-                userInputRequests[index] = UserInputRequestSummary(
-                    requestID: request.requestID,
-                    threadID: request.threadID,
-                    agentID: request.agentID,
-                    questions: questions,
-                    status: request.status,
-                    updatedAt: request.updatedAt
+                userInputRequests[index] = mergedUserInputRequest(
+                    existing: userInputRequests[index],
+                    incoming: request
                 )
+                currentStatus = userInputRequests[index].status
             } else {
                 userInputRequests.insert(request, at: 0)
+                currentStatus = request.status
             }
-            if request.status == .resolved || !request.questions.isEmpty {
+            if currentStatus != .resolved {
+                runtimeState = .waitingApproval
+            }
+            if let current = currentUserInputRequest(request.requestID),
+               current.status == .resolved || (current.status == .pending && !request.questions.isEmpty) {
                 userInputResponseFailures[request.requestID] = nil
             }
 
@@ -421,6 +422,43 @@ extension AppModel {
         case .modelSync(let state):
             applyModelSync(state)
         }
+    }
+
+    /// Keeps a mobile-local response from being moved back to pending by a
+    /// duplicate app-server elicitation replay for the same request id.
+    private func mergedUserInputRequest(
+        existing: UserInputRequestSummary,
+        incoming: UserInputRequestSummary
+    ) -> UserInputRequestSummary {
+        let regression = isUserInputStatusRegression(existing: existing.status, incoming: incoming.status)
+        return UserInputRequestSummary(
+            requestID: incoming.requestID,
+            threadID: regression ? existing.threadID : incoming.threadID,
+            agentID: regression ? existing.agentID : incoming.agentID,
+            questions: incoming.questions.isEmpty ? existing.questions : incoming.questions,
+            status: mergedUserInputStatus(existing: existing.status, incoming: incoming.status),
+            updatedAt: regression ? existing.updatedAt : incoming.updatedAt
+        )
+    }
+
+    private func mergedUserInputStatus(
+        existing: ApprovalStatus,
+        incoming: ApprovalStatus
+    ) -> ApprovalStatus {
+        if existing == .resolved || incoming == .resolved {
+            return .resolved
+        }
+        if isUserInputStatusRegression(existing: existing, incoming: incoming) {
+            return existing
+        }
+        return incoming
+    }
+
+    private func isUserInputStatusRegression(
+        existing: ApprovalStatus,
+        incoming: ApprovalStatus
+    ) -> Bool {
+        (existing == .submitting || existing == .failed || existing == .resolved) && incoming == .pending
     }
 
     /// Inserts an optimistic local user prompt that will be replaced by desktop replay.

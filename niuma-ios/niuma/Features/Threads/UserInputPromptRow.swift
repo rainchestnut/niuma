@@ -65,7 +65,7 @@ struct UserInputPromptRow: View {
                         .fill(NiumaPalette.warningSoft)
                 )
             }
-            .buttonStyle(.plain)
+            .buttonStyle(UserInputPromptRowButtonStyle())
             .frame(maxWidth: .infinity, alignment: .leading)
 
             Spacer(minLength: 34)
@@ -107,13 +107,13 @@ struct UserInputPromptRow: View {
 
 struct UserInputPromptDetailView: View {
     @Environment(AppModel.self) private var appModel
-    @Environment(\.dismiss) private var dismiss
 
     let request: UserInputRequestSummary
 
     @State private var selectedAnswers: [String: Set<String>]
     @State private var textAnswers: [String: String]
     @State private var localErrorMessage: String?
+    @State private var isWaitingForConfirmation = false
 
     init(request: UserInputRequestSummary) {
         self.request = request
@@ -129,6 +129,14 @@ struct UserInputPromptDetailView: View {
         localErrorMessage ?? appModel.userInputFailureMessage(for: request.requestID)
     }
 
+    private var isResolved: Bool {
+        currentRequest.status == .resolved
+    }
+
+    private var isSubmitting: Bool {
+        currentRequest.status == .submitting || isWaitingForConfirmation
+    }
+
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
@@ -138,6 +146,8 @@ struct UserInputPromptDetailView: View {
                             questionSection(question)
                         }
                     }
+                    .disabled(isResolved || isSubmitting)
+                    .opacity(isResolved || isSubmitting ? 0.68 : 1)
                 }
 
                 if let failureMessage {
@@ -147,29 +157,49 @@ struct UserInputPromptDetailView: View {
                         .fixedSize(horizontal: false, vertical: true)
                 }
 
+                if let feedback = feedbackMessage {
+                    Text(feedback.text)
+                        .font(.footnote.weight(.semibold))
+                        .foregroundStyle(feedback.tone.foreground)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(12)
+                        .background(feedback.tone.background, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                }
+
                 Button {
                     Task { await submit() }
                 } label: {
                     HStack(spacing: 8) {
-                        if currentRequest.status == .submitting {
+                        if isSubmitting {
                             ProgressView()
+                                .controlSize(.small)
+                        } else if isResolved {
+                            Image(systemName: "checkmark.circle.fill")
                         } else {
                             Image(systemName: "paperplane.fill")
                         }
-                        Text(copy("user_input.submit"))
+                        Text(submitButtonTitle)
                     }
                     .font(.headline)
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 13)
                 }
                 .buttonStyle(.borderedProminent)
-                .disabled(currentRequest.status == .submitting || currentRequest.status == .resolved)
+                .disabled(isSubmitting || isResolved)
             }
             .padding(18)
         }
         .niumaScreenBackground()
         .navigationTitle(copy("user_input.navigation_title"))
         .navigationBarTitleDisplayMode(.inline)
+        .onChange(of: currentRequest.status) { _, status in
+            if status == .resolved {
+                isWaitingForConfirmation = false
+                localErrorMessage = nil
+            } else if status == .failed {
+                isWaitingForConfirmation = false
+            }
+        }
     }
 
     @ViewBuilder
@@ -267,10 +297,39 @@ struct UserInputPromptDetailView: View {
             return
         }
         localErrorMessage = nil
-        await appModel.respondToUserInput(currentRequest, answers: answers)
-        if appModel.currentUserInputRequest(request.requestID)?.status == .resolved {
-            dismiss()
+        isWaitingForConfirmation = true
+        do {
+            try await appModel.respondToUserInput(currentRequest, answers: answers)
+            if appModel.currentUserInputRequest(request.requestID)?.status == .resolved {
+                isWaitingForConfirmation = false
+            }
+        } catch {
+            isWaitingForConfirmation = false
+            localErrorMessage = error.localizedDescription
         }
+    }
+
+    private var feedbackMessage: (text: String, tone: StatusBadge.Tone)? {
+        if failureMessage != nil {
+            return nil
+        }
+        if isResolved {
+            return (copy("user_input.feedback.resolved"), .positive)
+        }
+        if isSubmitting {
+            return (copy("user_input.feedback.waiting"), .neutral)
+        }
+        return nil
+    }
+
+    private var submitButtonTitle: String {
+        if isResolved {
+            return copy("user_input.submit.done")
+        }
+        if isSubmitting {
+            return copy("user_input.submit.waiting")
+        }
+        return copy("user_input.submit")
     }
 
     private func statusTitle(_ status: ApprovalStatus) -> String {
@@ -307,9 +366,26 @@ enum UserInputPromptCopy {
         case ("user_input.text_placeholder", .chinese): return "输入回答"
         case ("user_input.submit", .english): return "Submit"
         case ("user_input.submit", .chinese): return "提交"
+        case ("user_input.submit.waiting", .english): return "Sent"
+        case ("user_input.submit.waiting", .chinese): return "已发送"
+        case ("user_input.submit.done", .english): return "Completed"
+        case ("user_input.submit.done", .chinese): return "已完成"
+        case ("user_input.feedback.waiting", .english): return "Sent. Waiting for desktop confirmation."
+        case ("user_input.feedback.waiting", .chinese): return "已发送，等待桌面确认。"
+        case ("user_input.feedback.resolved", .english): return "Input completed."
+        case ("user_input.feedback.resolved", .chinese): return "输入已完成。"
         case ("user_input.validation", .english): return "Answer every question before submitting."
         case ("user_input.validation", .chinese): return "请先回答所有问题。"
         default: return key
         }
+    }
+}
+
+private struct UserInputPromptRowButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .contentShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+            .opacity(configuration.isPressed ? 0.86 : 1)
+            .scaleEffect(configuration.isPressed ? 0.99 : 1)
     }
 }

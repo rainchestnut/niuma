@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Instant;
 
 use anyhow::{Context, Result};
 use futures_util::{Sink, SinkExt, StreamExt};
@@ -27,6 +28,8 @@ use crate::thread_status::normalize_thread_status;
 use crate::transfers::{self, TransferContext, TransferReady, TransferStore};
 
 const CONVERSATION_PROJECT_ID: &str = "__conversation__";
+const COMPLETED_USER_INPUT_RETENTION: Duration = Duration::from_secs(30 * 60);
+const COMPLETED_USER_INPUT_LIMIT: usize = 128;
 
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct AgentChannelStatus {
@@ -128,6 +131,20 @@ struct PendingUserInput {
     response_format: UserInputResponseFormat,
 }
 
+#[derive(Debug, Clone)]
+struct CompletedUserInput {
+    thread_id: String,
+    completed_at: Instant,
+    response_payload: Option<Value>,
+}
+
+#[derive(Debug, Clone)]
+enum UserInputClaim {
+    New,
+    AlreadyPending,
+    AlreadyCompleted(Option<Value>),
+}
+
 /// Identifies how a mobile user-input answer must be translated back to the
 /// Codex app-server request that originally blocked the turn.
 #[derive(Debug, Clone)]
@@ -191,6 +208,7 @@ struct AgentChannelRuntime {
     transfer_context: Option<TransferContext>,
     pending_approvals: Arc<RwLock<HashMap<String, PendingApproval>>>,
     pending_user_inputs: Arc<RwLock<HashMap<String, PendingUserInput>>>,
+    completed_user_inputs: Arc<RwLock<HashMap<String, CompletedUserInput>>>,
     channel_status: Arc<RwLock<AgentChannelStatus>>,
 }
 
@@ -225,6 +243,7 @@ pub fn spawn_agent_channel(
     let active_threads = Arc::new(RwLock::new(HashMap::new()));
     let pending_approvals = Arc::new(RwLock::new(HashMap::new()));
     let pending_user_inputs = Arc::new(RwLock::new(HashMap::new()));
+    let completed_user_inputs = Arc::new(RwLock::new(HashMap::new()));
     let runtime = Arc::new(AgentChannelRuntime {
         identity,
         config,
@@ -234,6 +253,7 @@ pub fn spawn_agent_channel(
         transfer_context,
         pending_approvals,
         pending_user_inputs,
+        completed_user_inputs,
         channel_status,
     });
     tokio::spawn(async move {
@@ -411,6 +431,7 @@ where
             if let Some(sync) = handle_user_input_response(
                 runtime.codex_app_server.clone(),
                 runtime.pending_user_inputs.clone(),
+                runtime.completed_user_inputs.clone(),
                 inbound,
             )
             .await?
@@ -875,6 +896,7 @@ where
             runtime.active_threads.clone(),
             runtime.pending_approvals.clone(),
             runtime.pending_user_inputs.clone(),
+            runtime.completed_user_inputs.clone(),
             event,
         )
         .await?;
@@ -884,6 +906,7 @@ where
         &event,
         runtime.pending_approvals.clone(),
         runtime.pending_user_inputs.clone(),
+        runtime.completed_user_inputs.clone(),
     )
     .await
     {
@@ -1172,6 +1195,7 @@ async fn handle_app_server_request<S, E>(
     active_threads: Arc<RwLock<HashMap<String, ActiveThread>>>,
     pending_approvals: Arc<RwLock<HashMap<String, PendingApproval>>>,
     pending_user_inputs: Arc<RwLock<HashMap<String, PendingUserInput>>>,
+    completed_user_inputs: Arc<RwLock<HashMap<String, CompletedUserInput>>>,
     request: Value,
 ) -> Result<()>
 where
@@ -1190,19 +1214,17 @@ where
     let params = request.get("params").cloned().unwrap_or_else(|| json!({}));
     if method == "item/tool/requestUserInput" {
         if let Some((message, pending)) = build_user_input_request(&request_id, &params).await {
-            pending_user_inputs
-                .write()
-                .await
-                .insert(pending.request_id.clone(), pending);
-            if let Some(device_id) =
-                active_device_for_thread(&active_threads, &message.thread_id).await
-            {
-                send_wire_message(
-                    writer,
-                    user_input_request_wire(identity, &device_id, &message)?,
-                )
-                .await?;
-            }
+            forward_user_input_request_once(
+                writer,
+                app_server.clone(),
+                identity,
+                active_threads.clone(),
+                pending_user_inputs.clone(),
+                completed_user_inputs.clone(),
+                message,
+                pending,
+            )
+            .await?;
         } else {
             app_server
                 .respond_error(request_id, -32600, "invalid request_user_input payload")
@@ -1213,19 +1235,17 @@ where
     if method == "mcpServer/elicitation/request" {
         if let Some((message, pending)) = build_mcp_elicitation_request(&request_id, &params).await
         {
-            pending_user_inputs
-                .write()
-                .await
-                .insert(pending.request_id.clone(), pending);
-            if let Some(device_id) =
-                active_device_for_thread(&active_threads, &message.thread_id).await
-            {
-                send_wire_message(
-                    writer,
-                    user_input_request_wire(identity, &device_id, &message)?,
-                )
-                .await?;
-            }
+            forward_user_input_request_once(
+                writer,
+                app_server.clone(),
+                identity,
+                active_threads.clone(),
+                pending_user_inputs.clone(),
+                completed_user_inputs.clone(),
+                message,
+                pending,
+            )
+            .await?;
         } else {
             app_server
                 .respond_error(request_id, -32600, "invalid mcp elicitation payload")
@@ -1267,6 +1287,109 @@ where
         )
         .await?;
     Ok(())
+}
+
+async fn forward_user_input_request_once<S, E>(
+    writer: &mut S,
+    app_server: CodexAppServerClient,
+    identity: &AgentIdentity,
+    active_threads: Arc<RwLock<HashMap<String, ActiveThread>>>,
+    pending_user_inputs: Arc<RwLock<HashMap<String, PendingUserInput>>>,
+    completed_user_inputs: Arc<RwLock<HashMap<String, CompletedUserInput>>>,
+    message: UserInputWireData,
+    pending: PendingUserInput,
+) -> Result<()>
+where
+    S: Sink<Message, Error = E> + Unpin,
+    E: std::error::Error + Send + Sync + 'static,
+{
+    match claim_user_input_request(pending_user_inputs, completed_user_inputs, pending.clone())
+        .await
+    {
+        UserInputClaim::New => {}
+        UserInputClaim::AlreadyPending => return Ok(()),
+        UserInputClaim::AlreadyCompleted(Some(response_payload)) => {
+            app_server
+                .respond(pending.app_server_request_id.clone(), response_payload)
+                .await?;
+            return Ok(());
+        }
+        UserInputClaim::AlreadyCompleted(None) => return Ok(()),
+    }
+    if let Some(device_id) = active_device_for_thread(&active_threads, &message.thread_id).await {
+        send_wire_message(
+            writer,
+            user_input_request_wire(identity, &device_id, &message)?,
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+/// Claims a user-input request before it is sent to mobile. Codex app-server can
+/// replay the same elicitation while a turn is blocked; the mobile UI must see
+/// one lifecycle event, not a stream of duplicate pending cards.
+async fn claim_user_input_request(
+    pending_user_inputs: Arc<RwLock<HashMap<String, PendingUserInput>>>,
+    completed_user_inputs: Arc<RwLock<HashMap<String, CompletedUserInput>>>,
+    pending: PendingUserInput,
+) -> UserInputClaim {
+    {
+        let mut completed = completed_user_inputs.write().await;
+        prune_completed_user_inputs(&mut completed);
+        if let Some(completed) = completed.get(&pending.request_id) {
+            if completed.matches(&pending) {
+                return UserInputClaim::AlreadyCompleted(completed.response_payload.clone());
+            }
+        }
+    }
+
+    let mut user_inputs = pending_user_inputs.write().await;
+    if user_inputs.contains_key(&pending.request_id) {
+        return UserInputClaim::AlreadyPending;
+    }
+    user_inputs.insert(pending.request_id.clone(), pending);
+    UserInputClaim::New
+}
+
+fn mark_user_input_completed(
+    completed_user_inputs: &mut HashMap<String, CompletedUserInput>,
+    pending: &PendingUserInput,
+    response_payload: Option<Value>,
+) {
+    prune_completed_user_inputs(completed_user_inputs);
+    completed_user_inputs.insert(
+        pending.request_id.clone(),
+        CompletedUserInput {
+            thread_id: pending.thread_id.clone(),
+            completed_at: Instant::now(),
+            response_payload,
+        },
+    );
+    while completed_user_inputs.len() > COMPLETED_USER_INPUT_LIMIT {
+        if let Some(oldest_key) = completed_user_inputs
+            .iter()
+            .min_by_key(|(_, completed)| completed.completed_at)
+            .map(|(key, _)| key.clone())
+        {
+            completed_user_inputs.remove(&oldest_key);
+        } else {
+            break;
+        }
+    }
+}
+
+fn prune_completed_user_inputs(completed_user_inputs: &mut HashMap<String, CompletedUserInput>) {
+    let now = Instant::now();
+    completed_user_inputs.retain(|_, completed| {
+        now.duration_since(completed.completed_at) <= COMPLETED_USER_INPUT_RETENTION
+    });
+}
+
+impl CompletedUserInput {
+    fn matches(&self, pending: &PendingUserInput) -> bool {
+        self.thread_id == pending.thread_id
+    }
 }
 
 async fn handle_approval_response(
@@ -1358,6 +1481,7 @@ async fn submit_approval_response(
 async fn handle_user_input_response(
     codex_app_server: Option<CodexAppServerClient>,
     pending_user_inputs: Arc<RwLock<HashMap<String, PendingUserInput>>>,
+    completed_user_inputs: Arc<RwLock<HashMap<String, CompletedUserInput>>>,
     inbound: UserInputResponseInbound,
 ) -> Result<Option<Value>> {
     let Some(app_server) = codex_app_server else {
@@ -1393,7 +1517,10 @@ async fn handle_user_input_response(
         }
     };
     if let Err(error) = app_server
-        .respond(pending.app_server_request_id.clone(), response_payload)
+        .respond(
+            pending.app_server_request_id.clone(),
+            response_payload.clone(),
+        )
         .await
     {
         pending_user_inputs
@@ -1405,6 +1532,10 @@ async fn handle_user_input_response(
             &inbound.request_id,
             &format!("user input response failed: {error:#}"),
         )));
+    }
+    {
+        let mut completed = completed_user_inputs.write().await;
+        mark_user_input_completed(&mut completed, &pending, Some(response_payload));
     }
     Ok(Some(user_input_sync(
         &pending.request_id,
@@ -2218,6 +2349,7 @@ async fn resolved_request_syncs(
     notification: &Value,
     pending_approvals: Arc<RwLock<HashMap<String, PendingApproval>>>,
     pending_user_inputs: Arc<RwLock<HashMap<String, PendingUserInput>>>,
+    completed_user_inputs: Arc<RwLock<HashMap<String, CompletedUserInput>>>,
 ) -> Vec<Value> {
     if notification.get("method").and_then(Value::as_str) != Some("serverRequest/resolved") {
         return Vec::new();
@@ -2261,6 +2393,10 @@ async fn resolved_request_syncs(
             .write()
             .await
             .remove(&user_input.request_id);
+        {
+            let mut completed = completed_user_inputs.write().await;
+            mark_user_input_completed(&mut completed, &user_input, None);
+        }
         syncs.push(user_input_sync(
             &user_input.request_id,
             &user_input.thread_id,
@@ -2817,9 +2953,10 @@ mod tests {
     use super::{
         ActiveThread, ApprovalResponseInbound, McpElicitationField, McpElicitationResponseFormat,
         McpElicitationValueKind, PendingApproval, PendingUserInput, ThreadArchiveRequest,
-        ThreadRenameRequest, UserInputResponseFormat, UserInputResponseInbound, agent_ws_url,
-        build_mcp_elicitation_request, claim_task_progress_push, handle_approval_response,
-        handle_user_input_response, task_progress_push_marker, thread_archive_failed_wire,
+        ThreadRenameRequest, UserInputClaim, UserInputResponseFormat, UserInputResponseInbound,
+        agent_ws_url, build_mcp_elicitation_request, claim_task_progress_push,
+        claim_user_input_request, handle_approval_response, handle_user_input_response,
+        mark_user_input_completed, task_progress_push_marker, thread_archive_failed_wire,
         thread_archive_result_wire, thread_rename_failed_wire, thread_rename_result_wire,
         thread_sync_completed, user_input_app_server_response,
     };
@@ -3077,6 +3214,61 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn user_input_claim_dedupes_pending_request() {
+        let pending_user_inputs = Arc::new(RwLock::new(HashMap::new()));
+        let completed_user_inputs = Arc::new(RwLock::new(HashMap::new()));
+        let pending = PendingUserInput {
+            request_id: "input-1".to_string(),
+            app_server_request_id: json!("rpc-1"),
+            thread_id: "thread-1".to_string(),
+            response_format: UserInputResponseFormat::CodexRequestUserInput,
+        };
+
+        assert!(matches!(
+            claim_user_input_request(
+                pending_user_inputs.clone(),
+                completed_user_inputs.clone(),
+                pending.clone(),
+            )
+            .await,
+            UserInputClaim::New
+        ));
+        assert!(matches!(
+            claim_user_input_request(pending_user_inputs, completed_user_inputs, pending).await,
+            UserInputClaim::AlreadyPending
+        ));
+    }
+
+    #[tokio::test]
+    async fn user_input_claim_reuses_completed_response() {
+        let pending_user_inputs = Arc::new(RwLock::new(HashMap::new()));
+        let completed_user_inputs = Arc::new(RwLock::new(HashMap::new()));
+        let pending = PendingUserInput {
+            request_id: "input-1".to_string(),
+            app_server_request_id: json!("rpc-1"),
+            thread_id: "thread-1".to_string(),
+            response_format: UserInputResponseFormat::CodexRequestUserInput,
+        };
+
+        {
+            let mut completed = completed_user_inputs.write().await;
+            mark_user_input_completed(&mut completed, &pending, Some(json!({"ok": true})));
+        }
+        let duplicate = PendingUserInput {
+            app_server_request_id: json!("rpc-2"),
+            ..pending
+        };
+
+        match claim_user_input_request(pending_user_inputs, completed_user_inputs, duplicate).await
+        {
+            UserInputClaim::AlreadyCompleted(Some(response)) => {
+                assert_eq!(response["ok"], true);
+            }
+            claim => panic!("unexpected claim: {claim:?}"),
+        }
+    }
+
     #[test]
     fn mcp_form_elicitation_response_builds_structured_content() {
         let pending = PendingUserInput {
@@ -3237,6 +3429,7 @@ mod tests {
     async fn user_input_response_without_app_server_reports_failure() {
         let response = handle_user_input_response(
             None,
+            Arc::new(RwLock::new(HashMap::new())),
             Arc::new(RwLock::new(HashMap::new())),
             UserInputResponseInbound {
                 device_id: "ios-device".to_string(),

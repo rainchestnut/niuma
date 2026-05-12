@@ -149,6 +149,7 @@ enum ThreadTimelineRow: Identifiable {
     case processGroup(ThreadProcessGroup)
     case message(ThreadMessageRenderItem)
     case approval(ApprovalSummary)
+    case userInput(UserInputRequestSummary)
 
     var id: String {
         switch self {
@@ -158,11 +159,17 @@ enum ThreadTimelineRow: Identifiable {
             return item.id
         case .approval(let approval):
             return "approval-\(approval.approvalID)"
+        case .userInput(let request):
+            return "user-input-\(request.requestID)"
         }
     }
 
-    /// Merges pending approvals into the same chronological stream as messages.
-    static func merge(items: [ThreadRenderItem], approvals: [ApprovalSummary]) -> [ThreadTimelineRow] {
+    /// Merges blocking interaction prompts into the same chronological stream as messages.
+    static func merge(
+        items: [ThreadRenderItem],
+        approvals: [ApprovalSummary],
+        userInputs: [UserInputRequestSummary]
+    ) -> [ThreadTimelineRow] {
         var sortItems: [ThreadTimelineSortItem] = items.enumerated().map { offset, item in
             let row = ThreadTimelineRow(item)
             return ThreadTimelineSortItem(
@@ -181,6 +188,18 @@ enum ThreadTimelineRow: Identifiable {
                     date: row.sortDate,
                     priority: row.sortPriority,
                     sourceOffset: items.count + offset
+                )
+            }
+        )
+
+        sortItems.append(
+            contentsOf: userInputs.enumerated().map { offset, request in
+                let row = ThreadTimelineRow.userInput(request)
+                return ThreadTimelineSortItem(
+                    row: row,
+                    date: row.sortDate,
+                    priority: row.sortPriority,
+                    sourceOffset: items.count + approvals.count + offset
                 )
             }
         )
@@ -214,6 +233,8 @@ enum ThreadTimelineRow: Identifiable {
             return item.entry.createdAt
         case .approval(let approval):
             return approval.updatedAt
+        case .userInput(let request):
+            return request.updatedAt
         }
     }
 
@@ -221,7 +242,7 @@ enum ThreadTimelineRow: Identifiable {
         switch self {
         case .processGroup, .message:
             return 0
-        case .approval:
+        case .approval, .userInput:
             return 1
         }
     }

@@ -672,6 +672,7 @@ nonisolated enum AppModelError: LocalizedError {
     case missingDeviceIdentity
     case missingAgentBinding
     case approvalNotPending
+    case userInputNotPending
 
     var errorDescription: String? {
         switch self {
@@ -705,6 +706,8 @@ nonisolated enum AppModelError: LocalizedError {
             return String(localized: "error.missing_agent_binding", table: "Localizable")
         case .approvalNotPending:
             return String(localized: "error.approval_not_pending", table: "Localizable")
+        case .userInputNotPending:
+            return String(localized: "error.user_input_not_pending", table: "Localizable")
         }
     }
 }
