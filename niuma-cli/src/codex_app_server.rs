@@ -327,14 +327,8 @@ impl CodexAppServerClient {
 
     /// Update the source Codex thread title through app-server.
     pub async fn set_thread_name(&self, thread_id: &str, thread_name: &str) -> Result<()> {
-        self.request(
-            "thread/name/set",
-            json!({
-                "threadId": thread_id,
-                "threadName": thread_name,
-            }),
-        )
-        .await?;
+        let params = thread_name_set_params(thread_id, thread_name);
+        self.request("thread/name/set", params).await?;
         Ok(())
     }
 
@@ -650,6 +644,13 @@ fn thread_resume_params(
     params
 }
 
+fn thread_name_set_params(thread_id: &str, thread_name: &str) -> Value {
+    json!({
+        "threadId": thread_id,
+        "name": thread_name,
+    })
+}
+
 #[derive(Debug, Clone, Copy)]
 enum SandboxOverrideShape {
     ThreadStartOrResume,
@@ -766,6 +767,15 @@ mod tests {
 
         assert_eq!(params["threadId"], "thread-1");
         assert!(params.get("cwd").is_none());
+    }
+
+    #[test]
+    fn thread_name_set_params_follow_app_server_shape() {
+        let params = thread_name_set_params("thread-1", "new title");
+
+        assert_eq!(params["threadId"], "thread-1");
+        assert_eq!(params["name"], "new title");
+        assert!(params.get("threadName").is_none());
     }
 
     #[test]
