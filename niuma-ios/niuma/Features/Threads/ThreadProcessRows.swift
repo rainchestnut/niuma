@@ -76,9 +76,11 @@ private struct ProcessTextRow: View {
         VStack(alignment: .leading, spacing: 5) {
             ThreadEntryContentView(item: item)
 
-            Text(DateFormatting.timeAndDate.string(from: item.entry.createdAt))
-                .font(.caption2)
-                .foregroundStyle(NiumaPalette.mutedInk)
+            if let createdAt = item.entry.createdAt {
+                Text(DateFormatting.timeAndDate.string(from: createdAt))
+                    .font(.caption2)
+                    .foregroundStyle(NiumaPalette.mutedInk)
+            }
         }
         .padding(.horizontal, 2)
         .frame(maxWidth: .infinity, alignment: .leading)

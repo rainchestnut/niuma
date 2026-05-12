@@ -205,8 +205,10 @@ enum ThreadTimelineRow: Identifiable {
         )
 
         return sortItems.sorted { left, right in
-            if left.date != right.date {
-                return left.date < right.date
+            if let leftDate = left.date,
+               let rightDate = right.date,
+               leftDate != rightDate {
+                return leftDate < rightDate
             }
             if left.priority != right.priority {
                 return left.priority < right.priority
@@ -225,10 +227,10 @@ enum ThreadTimelineRow: Identifiable {
         }
     }
 
-    private var sortDate: Date {
+    private var sortDate: Date? {
         switch self {
         case .processGroup(let group):
-            return group.entries.last?.entry.createdAt ?? .distantPast
+            return group.entries.last?.entry.createdAt
         case .message(let item):
             return item.entry.createdAt
         case .approval(let approval):
@@ -256,7 +258,7 @@ private enum ThreadEntryTimelineKind {
 
 private struct ThreadTimelineSortItem {
     let row: ThreadTimelineRow
-    let date: Date
+    let date: Date?
     let priority: Int
     let sourceOffset: Int
 }

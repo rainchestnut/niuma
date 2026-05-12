@@ -144,7 +144,7 @@ final class StoredThreadEntry {
     var type: String
     var phase: String?
     var text: String
-    var createdAt: Date
+    var createdAt: Date?
     var seq: Int
     var contentPartsData: Data?
 

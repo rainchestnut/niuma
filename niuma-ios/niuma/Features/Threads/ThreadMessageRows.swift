@@ -24,9 +24,11 @@ struct ThreadEntryRow: View {
                     VStack(alignment: .leading, spacing: 6) {
                         ThreadEntryContentView(item: item, imagePlacement: .external)
 
-                        Text(DateFormatting.timeAndDate.string(from: entry.createdAt))
-                            .font(.caption2)
-                            .foregroundStyle(NiumaPalette.mutedInk)
+                        if let createdAt = entry.createdAt {
+                            Text(DateFormatting.timeAndDate.string(from: createdAt))
+                                .font(.caption2)
+                                .foregroundStyle(NiumaPalette.mutedInk)
+                        }
                     }
                     .padding(.horizontal, 11)
                     .padding(.vertical, 9)
@@ -35,9 +37,11 @@ struct ThreadEntryRow: View {
                             .fill(backgroundColor)
                     )
                 } else {
-                    Text(DateFormatting.timeAndDate.string(from: entry.createdAt))
-                        .font(.caption2)
-                        .foregroundStyle(NiumaPalette.mutedInk)
+                    if let createdAt = entry.createdAt {
+                        Text(DateFormatting.timeAndDate.string(from: createdAt))
+                            .font(.caption2)
+                            .foregroundStyle(NiumaPalette.mutedInk)
+                    }
                 }
             }
             .frame(maxWidth: .infinity, alignment: frameAlignment)

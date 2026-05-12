@@ -68,13 +68,18 @@ extension AppModel {
 }
 
 extension ThreadTimeline {
-    /// Sorts timeline entries by the Codex-projected sequence and then by timestamp.
+    /// Sorts timeline entries by the Codex-projected sequence and then by timestamp when present.
     nonisolated mutating func sortForTimelineDisplay() {
         entries.sort { left, right in
             if left.seq != right.seq {
                 return left.seq < right.seq
             }
-            return left.createdAt < right.createdAt
+            if let leftDate = left.createdAt,
+               let rightDate = right.createdAt,
+               leftDate != rightDate {
+                return leftDate < rightDate
+            }
+            return left.id < right.id
         }
     }
 }

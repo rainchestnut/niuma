@@ -319,7 +319,7 @@ private actor ThreadSyncPipelineWorker {
         }
         var descriptor = FetchDescriptor<StoredThreadEntry>(
             predicate: predicate,
-            sortBy: [SortDescriptor(\.seq), SortDescriptor(\.createdAt)]
+            sortBy: [SortDescriptor(\.seq)]
         )
         descriptor.includePendingChanges = true
         return (try? context.fetch(descriptor)) ?? []
