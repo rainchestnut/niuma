@@ -132,6 +132,29 @@ struct DeviceIdentityService {
         return try sign(message: digest)
     }
 
+    func makeTaskSteerSignature(
+        deviceID: String,
+        agentID: String,
+        threadID: String,
+        ciphertext: String
+    ) throws -> String {
+        let digest = Self.taskSteerDigest(
+            deviceID: deviceID,
+            agentID: agentID,
+            threadID: threadID,
+            ciphertext: ciphertext
+        )
+        return try sign(message: digest)
+    }
+
+    func makeTaskInterruptSignature(
+        deviceID: String,
+        agentID: String,
+        threadID: String
+    ) throws -> String {
+        try sign(message: Self.taskInterruptDigest(deviceID: deviceID, agentID: agentID, threadID: threadID))
+    }
+
     /// Builds the pair-scoped crypto context used for business payload encryption.
     func makePayloadCryptoContext(peerPublicKey: String, bindingID: String) throws -> PayloadCryptoContext {
         guard let rawPrivateKey = secretStore.data(forKey: encryptionPrivateKeyKey) else {
@@ -182,6 +205,23 @@ struct DeviceIdentityService {
         ciphertext: String
     ) -> String {
         sha256Hex("\(deviceID):\(agentID):\(projectID):\(threadID ?? ""):\(ciphertext)")
+    }
+
+    private static func taskSteerDigest(
+        deviceID: String,
+        agentID: String,
+        threadID: String,
+        ciphertext: String
+    ) -> String {
+        sha256Hex("task_steer:\(deviceID):\(agentID):\(threadID):\(ciphertext)")
+    }
+
+    private static func taskInterruptDigest(
+        deviceID: String,
+        agentID: String,
+        threadID: String
+    ) -> String {
+        sha256Hex("task_interrupt:\(deviceID):\(agentID):\(threadID)")
     }
 
     private static func sha256Hex(_ value: String) -> String {

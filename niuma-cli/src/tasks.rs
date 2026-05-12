@@ -8,7 +8,7 @@ use anyhow::{Context, Result};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::codex_app_server::{CodexAppServerClient, TurnStartPayload};
+use crate::codex_app_server::{CodexAppServerClient, TurnStartPayload, TurnSteerPayload};
 use crate::codex_projection::{
     fallback_started_turn_event, file_part_attachment_line, file_part_type,
     metadata_messages_for_thread, replay_events_from_thread, should_emit_started_user_event,
@@ -38,6 +38,25 @@ pub struct TaskStartInbound {
     pub approval_policy: Option<String>,
     pub approvals_reviewer: Option<String>,
     pub sandbox_mode: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct TaskSteerInbound {
+    #[serde(default)]
+    pub request_id: Option<String>,
+    pub device_id: String,
+    pub agent_id: String,
+    pub thread_id: String,
+    pub ciphertext: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct TaskInterruptInbound {
+    #[serde(default)]
+    pub request_id: Option<String>,
+    pub device_id: String,
+    pub agent_id: String,
+    pub thread_id: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -170,6 +189,21 @@ impl TaskRuntime {
         Ok(messages)
     }
 
+    /// Steer a running Codex turn with mobile-originated additional input.
+    pub async fn steer_task(&self, message: TaskSteerInbound) -> Result<()> {
+        let plaintext = self.decrypt_mobile_steer_payload(&message)?;
+        let input_items = self
+            .decode_mobile_payload_to_codex_input(&message.device_id, &plaintext)
+            .await;
+        self.app_server
+            .steer_turn_payload(TurnSteerPayload {
+                thread_id: &message.thread_id,
+                input_items,
+            })
+            .await?;
+        Ok(())
+    }
+
     /// Replay thread entries after the mobile cursor.
     pub async fn resume_thread_messages(&self, message: ResumeThreadInbound) -> Result<Vec<Value>> {
         let thread_payload = self
@@ -213,6 +247,21 @@ impl TaskRuntime {
             &aad,
         )?;
         String::from_utf8(plaintext).context("task_start plaintext is not utf-8")
+    }
+
+    fn decrypt_mobile_steer_payload(&self, message: &TaskSteerInbound) -> Result<String> {
+        let binding = bindings::binding_for_device(&message.device_id)?
+            .with_context(|| format!("missing pair binding for device {}", message.device_id))?;
+        let aad = task_steer_aad(message);
+        let plaintext = crypto::decrypt_payload(
+            &self.identity.encryption_private_key,
+            &binding.ios_encryption_public_key,
+            &binding.binding_id,
+            crypto::PayloadDirection::IosToAgent,
+            &message.ciphertext,
+            &aad,
+        )?;
+        String::from_utf8(plaintext).context("task_steer plaintext is not utf-8")
     }
 
     async fn decode_mobile_payload_to_codex_input(
@@ -341,6 +390,15 @@ pub fn task_start_aad(message: &TaskStartInbound) -> Vec<u8> {
         ("agent_id", message.agent_id.clone()),
         ("project_id", message.project_id.clone()),
         ("thread_id", message.thread_id.clone().unwrap_or_default()),
+    ])
+}
+
+pub fn task_steer_aad(message: &TaskSteerInbound) -> Vec<u8> {
+    crypto::payload_aad(&[
+        ("kind", "task_steer".to_string()),
+        ("device_id", message.device_id.clone()),
+        ("agent_id", message.agent_id.clone()),
+        ("thread_id", message.thread_id.clone()),
     ])
 }
 

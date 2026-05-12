@@ -1,6 +1,6 @@
 //! Agent WebSocket channel for server-routed mobile control messages.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -23,7 +23,9 @@ use crate::identity::AgentIdentity;
 use crate::metadata::{self, CodexMetadataProjector, CodexThreadRecord, CodexWorkspaceStore};
 use crate::pairing::PairingRuntimeState;
 use crate::server::NiumaServerClient;
-use crate::tasks::{ResumeThreadInbound, TaskRuntime, TaskStartInbound};
+use crate::tasks::{
+    ResumeThreadInbound, TaskInterruptInbound, TaskRuntime, TaskStartInbound, TaskSteerInbound,
+};
 use crate::thread_status::normalize_thread_status;
 use crate::transfers::{self, TransferContext, TransferReady, TransferStore};
 
@@ -111,6 +113,7 @@ struct ActiveThread {
     cursor: i64,
     checkpoint: Option<String>,
     project_id: Option<String>,
+    active_turn_id: Option<String>,
     last_pushed_completion: Option<String>,
 }
 
@@ -209,6 +212,7 @@ struct AgentChannelRuntime {
     pending_approvals: Arc<RwLock<HashMap<String, PendingApproval>>>,
     pending_user_inputs: Arc<RwLock<HashMap<String, PendingUserInput>>>,
     completed_user_inputs: Arc<RwLock<HashMap<String, CompletedUserInput>>>,
+    pending_task_starts: Arc<RwLock<HashMap<String, VecDeque<TaskStartInbound>>>>,
     channel_status: Arc<RwLock<AgentChannelStatus>>,
 }
 
@@ -244,6 +248,7 @@ pub fn spawn_agent_channel(
     let pending_approvals = Arc::new(RwLock::new(HashMap::new()));
     let pending_user_inputs = Arc::new(RwLock::new(HashMap::new()));
     let completed_user_inputs = Arc::new(RwLock::new(HashMap::new()));
+    let pending_task_starts = Arc::new(RwLock::new(HashMap::new()));
     let runtime = Arc::new(AgentChannelRuntime {
         identity,
         config,
@@ -254,6 +259,7 @@ pub fn spawn_agent_channel(
         pending_approvals,
         pending_user_inputs,
         completed_user_inputs,
+        pending_task_starts,
         channel_status,
     });
     tokio::spawn(async move {
@@ -364,7 +370,30 @@ where
                 &runtime.identity,
                 runtime.codex_app_server.clone(),
                 runtime.active_threads.clone(),
+                runtime.pending_task_starts.clone(),
                 runtime.transfer_context.clone(),
+                inbound,
+            )
+            .await?;
+        }
+        "task_steer" => {
+            let inbound: TaskSteerInbound = serde_json::from_value(value)?;
+            handle_task_steer(
+                writer,
+                &runtime.identity,
+                runtime.codex_app_server.clone(),
+                runtime.transfer_context.clone(),
+                inbound,
+            )
+            .await?;
+        }
+        "task_interrupt" => {
+            let inbound: TaskInterruptInbound = serde_json::from_value(value)?;
+            handle_task_interrupt(
+                writer,
+                &runtime.identity,
+                runtime.codex_app_server.as_ref(),
+                runtime.active_threads.clone(),
                 inbound,
             )
             .await?;
@@ -450,6 +479,7 @@ async fn handle_task_start<S, E>(
     identity: &AgentIdentity,
     codex_app_server: Option<CodexAppServerClient>,
     active_threads: Arc<RwLock<HashMap<String, ActiveThread>>>,
+    pending_task_starts: Arc<RwLock<HashMap<String, VecDeque<TaskStartInbound>>>>,
     transfer_context: Option<TransferContext>,
     inbound: TaskStartInbound,
 ) -> Result<()>
@@ -486,11 +516,59 @@ where
         .await?;
         return Ok(());
     };
+
+    if let Some(thread_id) = inbound.thread_id.clone()
+        && should_queue_task_start(&app_server, active_threads.clone(), &thread_id).await
+    {
+        let queued_count = enqueue_task_start(pending_task_starts, &thread_id, inbound).await;
+        send_wire_message(
+            writer,
+            task_queue_sync(&device_id, &thread_id, queued_count, "queued"),
+        )
+        .await?;
+        return Ok(());
+    }
+
+    start_task_now(
+        writer,
+        identity,
+        app_server,
+        active_threads,
+        transfer_context,
+        inbound,
+        &fallback_thread_id,
+        request_id.as_deref(),
+        &project_id,
+    )
+    .await?;
+    Ok(())
+}
+
+async fn start_task_now<S, E>(
+    writer: &mut S,
+    identity: &AgentIdentity,
+    app_server: CodexAppServerClient,
+    active_threads: Arc<RwLock<HashMap<String, ActiveThread>>>,
+    transfer_context: Option<TransferContext>,
+    inbound: TaskStartInbound,
+    fallback_thread_id: &str,
+    request_id: Option<&str>,
+    project_id: &str,
+) -> Result<()>
+where
+    S: Sink<Message, Error = E> + Unpin,
+    E: std::error::Error + Send + Sync + 'static,
+{
+    let device_id = inbound.device_id.clone();
+    let requested_thread_id = inbound.thread_id.clone();
     match TaskRuntime::new(identity.clone(), app_server, transfer_context.clone())
         .start_task_messages(inbound)
         .await
     {
         Ok(messages) => {
+            if let Some(thread_id) = requested_thread_id {
+                mark_thread_running(active_threads.clone(), &thread_id, None).await;
+            }
             send_wire_messages(
                 writer,
                 identity,
@@ -505,12 +583,12 @@ where
                 writer,
                 encrypt_task_update(
                     identity,
-                    task_error_update(&device_id, &fallback_thread_id, &err.to_string()),
+                    task_error_update(&device_id, fallback_thread_id, &err.to_string()),
                 )?,
             )
             .await?;
             warn!(
-                request_id = %request_id.as_deref().unwrap_or(""),
+                request_id = %request_id.unwrap_or(""),
                 device_id = %device_id,
                 project_id = %project_id,
                 thread_id = %fallback_thread_id,
@@ -519,6 +597,160 @@ where
         }
     }
     Ok(())
+}
+
+async fn handle_task_steer<S, E>(
+    writer: &mut S,
+    identity: &AgentIdentity,
+    codex_app_server: Option<CodexAppServerClient>,
+    transfer_context: Option<TransferContext>,
+    inbound: TaskSteerInbound,
+) -> Result<()>
+where
+    S: Sink<Message, Error = E> + Unpin,
+    E: std::error::Error + Send + Sync + 'static,
+{
+    let request_id = inbound.request_id.clone();
+    let device_id = inbound.device_id.clone();
+    let thread_id = inbound.thread_id.clone();
+    let result = if let Some(app_server) = codex_app_server {
+        TaskRuntime::new(identity.clone(), app_server, transfer_context)
+            .steer_task(inbound)
+            .await
+    } else {
+        Err(anyhow::anyhow!("Codex app-server is not connected"))
+    };
+    send_wire_message(
+        writer,
+        task_action_sync(
+            "task_steer_sync",
+            &device_id,
+            request_id.as_deref(),
+            &thread_id,
+            result.as_ref().err().map(|error| error.to_string()),
+        ),
+    )
+    .await
+}
+
+async fn handle_task_interrupt<S, E>(
+    writer: &mut S,
+    identity: &AgentIdentity,
+    app_server: Option<&CodexAppServerClient>,
+    active_threads: Arc<RwLock<HashMap<String, ActiveThread>>>,
+    inbound: TaskInterruptInbound,
+) -> Result<()>
+where
+    S: Sink<Message, Error = E> + Unpin,
+    E: std::error::Error + Send + Sync + 'static,
+{
+    let error = if inbound.agent_id != identity.agent_id {
+        Some("task_interrupt agent_id does not match this gateway".to_string())
+    } else {
+        match app_server {
+            Some(app_server) => match app_server.interrupt_turn(&inbound.thread_id).await {
+                Ok(()) => {
+                    mark_thread_idle(active_threads, &inbound.thread_id).await;
+                    None
+                }
+                Err(error) => Some(error.to_string()),
+            },
+            None => Some("Codex app-server is not connected".to_string()),
+        }
+    };
+    send_wire_message(
+        writer,
+        task_action_sync(
+            "task_interrupt_sync",
+            &inbound.device_id,
+            inbound.request_id.as_deref(),
+            &inbound.thread_id,
+            error,
+        ),
+    )
+    .await
+}
+
+async fn should_queue_task_start(
+    app_server: &CodexAppServerClient,
+    active_threads: Arc<RwLock<HashMap<String, ActiveThread>>>,
+    thread_id: &str,
+) -> bool {
+    if active_threads
+        .read()
+        .await
+        .get(thread_id)
+        .and_then(|active| active.active_turn_id.as_ref())
+        .is_some()
+    {
+        return true;
+    }
+    app_server
+        .read_thread_payload(thread_id, false)
+        .await
+        .ok()
+        .map(|payload| normalize_thread_status(payload.get("status"), false))
+        .is_some_and(|status| status == "running" || status == "waiting_approval")
+}
+
+async fn enqueue_task_start(
+    pending_task_starts: Arc<RwLock<HashMap<String, VecDeque<TaskStartInbound>>>>,
+    thread_id: &str,
+    inbound: TaskStartInbound,
+) -> usize {
+    let mut pending = pending_task_starts.write().await;
+    let queue = pending.entry(thread_id.to_string()).or_default();
+    queue.push_back(inbound);
+    queue.len()
+}
+
+async fn mark_thread_running(
+    active_threads: Arc<RwLock<HashMap<String, ActiveThread>>>,
+    thread_id: &str,
+    turn_id: Option<String>,
+) {
+    let mut active = active_threads.write().await;
+    if let Some(current) = active.get_mut(thread_id) {
+        current.active_turn_id = turn_id.or_else(|| Some("mobile-started".to_string()));
+    }
+}
+
+async fn mark_thread_idle(
+    active_threads: Arc<RwLock<HashMap<String, ActiveThread>>>,
+    thread_id: &str,
+) {
+    let mut active = active_threads.write().await;
+    if let Some(current) = active.get_mut(thread_id) {
+        current.active_turn_id = None;
+    }
+}
+
+fn task_queue_sync(device_id: &str, thread_id: &str, queued_count: usize, status: &str) -> Value {
+    json!({
+        "kind": "task_queue_sync",
+        "device_id": device_id,
+        "thread_id": thread_id,
+        "queued_count": queued_count,
+        "status": status,
+    })
+}
+
+fn task_action_sync(
+    kind: &str,
+    device_id: &str,
+    request_id: Option<&str>,
+    thread_id: &str,
+    error: Option<String>,
+) -> Value {
+    let succeeded = error.is_none();
+    json!({
+        "kind": kind,
+        "device_id": device_id,
+        "request_id": request_id,
+        "thread_id": thread_id,
+        "succeeded": succeeded,
+        "error": error,
+    })
 }
 
 async fn handle_resume_thread<S, E>(
@@ -912,6 +1144,8 @@ where
     {
         send_wire_message(writer, sync).await?;
     }
+    let completed_thread_id =
+        apply_turn_lifecycle_notification(runtime.active_threads.clone(), &event).await;
     match notification_metadata_syncs(
         runtime.codex_app_server.as_ref(),
         runtime.active_threads.clone(),
@@ -985,7 +1219,87 @@ where
         &thread_id,
     )
     .await?;
+    if let Some(thread_id) = completed_thread_id {
+        start_next_queued_task(writer, runtime, &thread_id).await?;
+    }
     Ok(())
+}
+
+async fn apply_turn_lifecycle_notification(
+    active_threads: Arc<RwLock<HashMap<String, ActiveThread>>>,
+    notification: &Value,
+) -> Option<String> {
+    let thread_id = notification_thread_id(notification)?;
+    match notification_method(notification) {
+        Some("turn/started") => {
+            mark_thread_running(
+                active_threads,
+                &thread_id,
+                notification_turn_id(notification),
+            )
+            .await;
+            None
+        }
+        Some("turn/completed") => {
+            mark_thread_idle(active_threads, &thread_id).await;
+            Some(thread_id)
+        }
+        _ => None,
+    }
+}
+
+async fn start_next_queued_task<S, E>(
+    writer: &mut S,
+    runtime: &AgentChannelRuntime,
+    thread_id: &str,
+) -> Result<()>
+where
+    S: Sink<Message, Error = E> + Unpin,
+    E: std::error::Error + Send + Sync + 'static,
+{
+    let Some(app_server) = runtime.codex_app_server.clone() else {
+        return Ok(());
+    };
+    let next = {
+        let mut pending = runtime.pending_task_starts.write().await;
+        let Some(queue) = pending.get_mut(thread_id) else {
+            return Ok(());
+        };
+        let next = queue.pop_front();
+        let queued_count = queue.len();
+        let remove_empty = queue.is_empty();
+        if remove_empty {
+            pending.remove(thread_id);
+        }
+        next.map(|inbound| (inbound, queued_count))
+    };
+    let Some((inbound, queued_count)) = next else {
+        return Ok(());
+    };
+    let device_id = inbound.device_id.clone();
+    let project_id = inbound.project_id.clone();
+    let fallback_thread_id = inbound
+        .thread_id
+        .clone()
+        .unwrap_or_else(|| thread_id.to_string());
+    let request_id = inbound.request_id.clone();
+    send_wire_message(
+        writer,
+        task_queue_sync(&device_id, thread_id, queued_count, "started"),
+    )
+    .await?;
+    start_task_now(
+        writer,
+        &runtime.identity,
+        app_server,
+        runtime.active_threads.clone(),
+        runtime.transfer_context.clone(),
+        inbound,
+        &fallback_thread_id,
+        request_id.as_deref(),
+        &project_id,
+    )
+    .await
 }
 
 async fn maybe_send_task_progress_push<S, E>(
@@ -2688,6 +3002,7 @@ async fn track_wire_message(
             cursor,
             checkpoint,
             project_id,
+            active_turn_id: None,
             last_pushed_completion: None,
         });
 }
@@ -2954,11 +3269,11 @@ mod tests {
         ActiveThread, ApprovalResponseInbound, McpElicitationField, McpElicitationResponseFormat,
         McpElicitationValueKind, PendingApproval, PendingUserInput, ThreadArchiveRequest,
         ThreadRenameRequest, UserInputClaim, UserInputResponseFormat, UserInputResponseInbound,
-        agent_ws_url, build_mcp_elicitation_request, claim_task_progress_push,
-        claim_user_input_request, handle_approval_response, handle_user_input_response,
-        mark_user_input_completed, task_progress_push_marker, thread_archive_failed_wire,
-        thread_archive_result_wire, thread_rename_failed_wire, thread_rename_result_wire,
-        thread_sync_completed, user_input_app_server_response,
+        agent_ws_url, apply_turn_lifecycle_notification, build_mcp_elicitation_request,
+        claim_task_progress_push, claim_user_input_request, handle_approval_response,
+        handle_user_input_response, mark_user_input_completed, task_progress_push_marker,
+        thread_archive_failed_wire, thread_archive_result_wire, thread_rename_failed_wire,
+        thread_rename_result_wire, thread_sync_completed, user_input_app_server_response,
     };
 
     #[test]
@@ -3143,6 +3458,7 @@ mod tests {
                 cursor: 0,
                 checkpoint: None,
                 project_id: None,
+                active_turn_id: None,
                 last_pushed_completion: None,
             },
         )])));
@@ -3150,6 +3466,63 @@ mod tests {
         assert!(claim_task_progress_push(active_threads.clone(), "thread-1", "turn:turn-1").await);
         assert!(!claim_task_progress_push(active_threads.clone(), "thread-1", "turn:turn-1").await);
         assert!(claim_task_progress_push(active_threads, "thread-1", "turn:turn-2").await);
+    }
+
+    #[tokio::test]
+    async fn turn_lifecycle_notifications_update_active_turn_marker() {
+        let active_threads = Arc::new(RwLock::new(HashMap::from([(
+            "thread-1".to_string(),
+            ActiveThread {
+                device_id: "ios-device".to_string(),
+                cursor: 0,
+                checkpoint: None,
+                project_id: None,
+                active_turn_id: None,
+                last_pushed_completion: None,
+            },
+        )])));
+
+        let completed = apply_turn_lifecycle_notification(
+            active_threads.clone(),
+            &json!({
+                "method": "turn/started",
+                "params": {
+                    "threadId": "thread-1",
+                    "turnId": "turn-1"
+                }
+            }),
+        )
+        .await;
+        assert_eq!(completed, None);
+        assert_eq!(
+            active_threads
+                .read()
+                .await
+                .get("thread-1")
+                .and_then(|thread| thread.active_turn_id.as_deref()),
+            Some("turn-1")
+        );
+
+        let completed = apply_turn_lifecycle_notification(
+            active_threads.clone(),
+            &json!({
+                "method": "turn/completed",
+                "params": {
+                    "threadId": "thread-1",
+                    "turnId": "turn-1"
+                }
+            }),
+        )
+        .await;
+        assert_eq!(completed.as_deref(), Some("thread-1"));
+        assert_eq!(
+            active_threads
+                .read()
+                .await
+                .get("thread-1")
+                .and_then(|thread| thread.active_turn_id.as_deref()),
+            None
+        );
     }
 
     #[tokio::test]

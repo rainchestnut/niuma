@@ -113,6 +113,69 @@ extension AppModel {
         runtimeState = .streaming
     }
 
+    /// Sends additional input to the currently running Codex turn.
+    func steerTask(threadID: String, prompt: String, attachments: [OutgoingAttachment] = []) async {
+        do {
+            try await performTaskSteer(threadID: threadID, prompt: prompt, attachments: attachments)
+        } catch {
+            runtimeState = .failed
+            pendingError = error.localizedDescription
+        }
+    }
+
+    func performTaskSteer(
+        threadID: String,
+        prompt: String,
+        attachments: [OutgoingAttachment]
+    ) async throws {
+        guard !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !attachments.isEmpty else { return }
+        guard let identity, let selectedAgent else { return }
+        let controller = try requireController()
+        let sessionToken = try await authenticate(identity: identity, agent: selectedAgent)
+        let contentParts = try await buildContentParts(
+            prompt: prompt,
+            attachments: attachments,
+            identity: identity,
+            agent: selectedAgent,
+            sessionToken: sessionToken
+        )
+        runtimeState = .streaming
+        try await withTimeout(realtimeSendTimeout) {
+            try await controller.sendTaskSteer(
+                request: TaskSteerRequestData(
+                    deviceID: identity.deviceID,
+                    agentID: selectedAgent.agentID,
+                    bindingID: selectedAgent.bindingID,
+                    agentEncryptionPublicKey: selectedAgent.agentEncryptionPublicKey,
+                    threadID: threadID,
+                    prompt: prompt,
+                    contentParts: contentParts
+                )
+            )
+        }
+    }
+
+    /// Requests interruption of the active Codex turn for a session.
+    func interruptTask(threadID: String) async {
+        do {
+            guard let identity, let selectedAgent else { return }
+            let controller = try requireController()
+            _ = try await authenticate(identity: identity, agent: selectedAgent)
+            try await withTimeout(realtimeSendTimeout) {
+                try await controller.interruptTask(
+                    request: TaskInterruptRequestData(
+                        deviceID: identity.deviceID,
+                        agentID: selectedAgent.agentID,
+                        threadID: threadID
+                    )
+                )
+            }
+        } catch {
+            runtimeState = .failed
+            pendingError = error.localizedDescription
+        }
+    }
+
     /// Builds the payload-blind content-parts array sent to desktop Codex.
     func buildContentParts(
         prompt: String,

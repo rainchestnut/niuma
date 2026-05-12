@@ -23,6 +23,7 @@ final class AppModel {
     var transientOutgoingEntries: [String: [ThreadEntry]] = [:]
     var localAttachments: [String: LocalAttachmentPayload] = [:]
     var branchChangesByThread: [String: BranchChangesResult] = [:]
+    var queuedTaskCountsByThread: [String: Int] = [:]
     var archivingThreadIDs: Set<String> = []
     var renamingThreadIDs: Set<String> = []
     var availableModels: [String] = []

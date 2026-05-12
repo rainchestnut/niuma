@@ -79,6 +79,16 @@ protocol NiumaControlling: AnyObject {
     ///   - request: `TaskStartRequestData` containing routing ids, payload ciphertext, and mobile signature.
     func sendTaskStart(request: TaskStartRequestData) async throws
 
+    /// Sends additional input into the currently running Codex turn.
+    /// - Parameters:
+    ///   - request: `TaskSteerRequestData` containing the target thread and encrypted input.
+    func sendTaskSteer(request: TaskSteerRequestData) async throws
+
+    /// Requests interruption of the currently running Codex turn.
+    /// - Parameters:
+    ///   - request: `TaskInterruptRequestData` identifying the target thread.
+    func interruptTask(request: TaskInterruptRequestData) async throws
+
     /// Requests desktop replay for an existing thread.
     /// - Parameters:
     ///   - request: `ResumeThreadRequestData` containing the target thread and current mobile cursor.

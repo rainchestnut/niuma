@@ -71,6 +71,21 @@ pub fn task_start_digest(
     ))
 }
 
+pub fn task_steer_digest(
+    device_id: &str,
+    agent_id: &str,
+    thread_id: &str,
+    ciphertext: &str,
+) -> String {
+    sha256_hex(format!(
+        "task_steer:{device_id}:{agent_id}:{thread_id}:{ciphertext}"
+    ))
+}
+
+pub fn task_interrupt_digest(device_id: &str, agent_id: &str, thread_id: &str) -> String {
+    sha256_hex(format!("task_interrupt:{device_id}:{agent_id}:{thread_id}"))
+}
+
 pub fn verify_ed25519(public_key: &str, message: &str, signature: &str) -> bool {
     verify_ed25519_inner(public_key, message, signature).is_ok()
 }
@@ -99,7 +114,10 @@ fn decode_prefixed(value: &str, prefix: &str) -> Result<Vec<u8>> {
 
 #[cfg(test)]
 mod tests {
-    use super::{auth_digest, pair_ack_digest, pair_digest, task_start_digest};
+    use super::{
+        auth_digest, pair_ack_digest, pair_digest, task_interrupt_digest, task_start_digest,
+        task_steer_digest,
+    };
 
     #[test]
     fn digest_shapes_match_existing_protocol() {
@@ -118,6 +136,14 @@ mod tests {
         assert_eq!(
             task_start_digest("ios", "agent", "p", None, "payload"),
             "1f66ca84c3e4452c5a5d9d17e5fe2dd464ce5616c9ec88b04aa96031147eb277"
+        );
+        assert_eq!(
+            task_steer_digest("ios", "agent", "thread", "payload"),
+            "88660cdad8fce0246640baf51a0c7c8927549d62075d27764f2573afc2d07b0a"
+        );
+        assert_eq!(
+            task_interrupt_digest("ios", "agent", "thread"),
+            "837cc1ad49d0ba2ae0d89276713211c0906241676667134cfa4c33470c30ecb3"
         );
     }
 }

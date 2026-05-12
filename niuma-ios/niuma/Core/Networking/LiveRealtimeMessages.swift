@@ -47,6 +47,40 @@ nonisolated struct LiveTaskStartMessage: Encodable {
     }
 }
 
+nonisolated struct LiveTaskSteerMessage: Encodable {
+    let kind: String
+    let deviceID: String
+    let agentID: String
+    let threadID: String
+    let ciphertext: String
+    let signature: String
+
+    enum CodingKeys: String, CodingKey {
+        case kind
+        case deviceID = "device_id"
+        case agentID = "agent_id"
+        case threadID = "thread_id"
+        case ciphertext
+        case signature
+    }
+}
+
+nonisolated struct LiveTaskInterruptMessage: Encodable {
+    let kind: String
+    let deviceID: String
+    let agentID: String
+    let threadID: String
+    let signature: String
+
+    enum CodingKeys: String, CodingKey {
+        case kind
+        case deviceID = "device_id"
+        case agentID = "agent_id"
+        case threadID = "thread_id"
+        case signature
+    }
+}
+
 nonisolated struct LiveMetadataRefreshMessage: Encodable {
     let kind: String
     let requestID: String
@@ -319,6 +353,36 @@ nonisolated struct LiveThreadRenameResultMessage: Decodable {
         case requestID = "request_id"
         case deviceID = "device_id"
         case threadID = "thread_id"
+        case error
+    }
+}
+
+nonisolated struct LiveTaskQueueSyncMessage: Decodable {
+    let deviceID: String
+    let threadID: String
+    let queuedCount: Int
+    let status: String?
+
+    enum CodingKeys: String, CodingKey {
+        case deviceID = "device_id"
+        case threadID = "thread_id"
+        case queuedCount = "queued_count"
+        case status
+    }
+}
+
+nonisolated struct LiveTaskActionSyncMessage: Decodable {
+    let requestID: String?
+    let deviceID: String
+    let threadID: String
+    let succeeded: Bool
+    let error: String?
+
+    enum CodingKeys: String, CodingKey {
+        case requestID = "request_id"
+        case deviceID = "device_id"
+        case threadID = "thread_id"
+        case succeeded
         case error
     }
 }

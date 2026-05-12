@@ -145,6 +145,22 @@ struct TaskStartRequestData: Encodable {
     let sandboxMode: String?
 }
 
+struct TaskSteerRequestData: Encodable {
+    let deviceID: String
+    let agentID: String
+    let bindingID: String
+    let agentEncryptionPublicKey: String
+    let threadID: String
+    let prompt: String
+    let contentParts: [ContentPart]?
+}
+
+struct TaskInterruptRequestData: Encodable {
+    let deviceID: String
+    let agentID: String
+    let threadID: String
+}
+
 struct MetadataRefreshRequestData: Encodable {
     let requestID: String
     let deviceID: String

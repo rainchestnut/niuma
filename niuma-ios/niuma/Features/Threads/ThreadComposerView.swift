@@ -17,6 +17,10 @@ struct ThreadComposerBar: View {
     let onPickFile: () -> Void
     let onRemoveAttachment: (OutgoingAttachment) -> Void
     let onSend: () -> Void
+    let isTurnRunning: Bool
+    let queuedTaskCount: Int
+    let onSteer: (() -> Void)?
+    let onInterrupt: (() -> Void)?
 
     private let reasoningEfforts: [ReasoningEffort] = [.low, .medium, .high, .xhigh]
     private let intelligencePillMaximumWidth: CGFloat = 158
@@ -60,6 +64,13 @@ struct ThreadComposerBar: View {
                     }
                     intelligencePickerButton
                     permissionMenu
+                    if queuedTaskCount > 0 {
+                        ComposerPill(title: L10n.string("thread.queue.count", language: appModel.appLanguage, queuedTaskCount))
+                    }
+                    if isTurnRunning {
+                        steerButton
+                        turnControlMenu
+                    }
                     Spacer()
                 }
 
@@ -150,7 +161,7 @@ struct ThreadComposerBar: View {
                                     ProgressView()
                                         .tint(.white)
                                 } else {
-                                    Image(systemName: "arrow.up")
+                                    Image(systemName: isTurnRunning ? "clock" : "arrow.up")
                                         .font(.system(size: 16, weight: .bold))
                                 }
                             }
@@ -162,7 +173,7 @@ struct ThreadComposerBar: View {
                         .buttonStyle(.plain)
                         .disabled(!canSend)
                         .opacity(canSend ? 1 : 0.45)
-                        .accessibilityLabel(appModel.localized("common.send"))
+                        .accessibilityLabel(sendAccessibilityLabel)
                         .accessibilityIdentifier("thread-send-button")
                     }
                 }
@@ -205,6 +216,15 @@ struct ThreadComposerBar: View {
         speechTranscriber.stop()
         isPromptFocused.wrappedValue = false
         onSend()
+    }
+
+    private func steer() {
+        guard canSend, onSteer != nil else { return }
+        closeAttachmentPanel()
+        closeIntelligencePicker()
+        speechTranscriber.stop()
+        isPromptFocused.wrappedValue = false
+        onSteer?()
     }
 
     private func toggleAttachmentPanel() {
@@ -344,6 +364,47 @@ struct ThreadComposerBar: View {
         .buttonStyle(.plain)
         .accessibilityLabel(appModel.localized("thread.permissions.accessibility"))
         .accessibilityIdentifier("thread-permission-menu")
+    }
+
+    private var steerButton: some View {
+        Button {
+            steer()
+        } label: {
+            ComposerPill(title: composerCopy("thread.steer.action"))
+        }
+        .buttonStyle(.plain)
+        .disabled(!canSend)
+        .opacity(canSend ? 1 : 0.45)
+        .accessibilityLabel(composerCopy("thread.steer.accessibility"))
+        .accessibilityIdentifier("thread-steer-button")
+    }
+
+    private var turnControlMenu: some View {
+        Menu {
+            Button(role: .destructive) {
+                onInterrupt?()
+            } label: {
+                Label(composerCopy("thread.interrupt.action"), systemImage: "stop.circle")
+            }
+        } label: {
+            Image(systemName: "ellipsis.circle")
+                .font(.system(size: 16, weight: .semibold))
+                .foregroundStyle(NiumaPalette.ink)
+                .frame(width: 30, height: 30)
+                .contentShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .disabled(onInterrupt == nil)
+        .accessibilityLabel(composerCopy("thread.running.controls"))
+        .accessibilityIdentifier("thread-running-controls-menu")
+    }
+
+    private var sendAccessibilityLabel: String {
+        isTurnRunning ? composerCopy("thread.queue.action") : appModel.localized("common.send")
+    }
+
+    private func composerCopy(_ key: String) -> String {
+        L10n.string(key, language: appModel.appLanguage)
     }
 
     private func menuLabel(title: String, isSelected: Bool) -> some View {

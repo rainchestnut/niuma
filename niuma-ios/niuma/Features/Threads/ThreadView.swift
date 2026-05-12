@@ -68,6 +68,14 @@ struct ThreadView: View {
             .sorted { $0.updatedAt < $1.updatedAt }
     }
 
+    private var isTurnRunning: Bool {
+        thread.status == .running || thread.status == .waitingApproval || thread.status == .pending
+    }
+
+    private var queuedTaskCount: Int {
+        appModel.queuedTaskCountsByThread[thread.threadID] ?? 0
+    }
+
     var body: some View {
         let snapshot = currentRenderSnapshot
         let timelineRows = ThreadTimelineRow.merge(
@@ -305,6 +313,12 @@ struct ThreadView: View {
                         tone: .warning
                     )
                 }
+                if queuedTaskCount > 0 {
+                    StatusBadge(
+                        title: L10n.string("thread.queue.count", language: appModel.appLanguage, queuedTaskCount),
+                        tone: .warning
+                    )
+                }
             }
             if let refreshError {
                 Text(refreshError)
@@ -331,7 +345,11 @@ struct ThreadView: View {
             onRemoveAttachment: { attachment in
                 pendingAttachments.removeAll { $0.id == attachment.id }
             },
-            onSend: sendPrompt
+            onSend: sendPrompt,
+            isTurnRunning: isTurnRunning,
+            queuedTaskCount: queuedTaskCount,
+            onSteer: steerPrompt,
+            onInterrupt: interruptCurrentTurn
         )
     }
 
@@ -351,6 +369,30 @@ struct ThreadView: View {
                 prompt: text,
                 attachments: attachments
             )
+        }
+    }
+
+    /// Sends the current composer payload to Codex `turn/steer` for this running session.
+    private func steerPrompt() {
+        let text = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty || !pendingAttachments.isEmpty else { return }
+        let attachments = pendingAttachments
+        prompt = ""
+        pendingAttachments = []
+        isPromptFocused = false
+        shouldScrollAfterNextRender = true
+        Task {
+            await appModel.steerTask(
+                threadID: thread.threadID,
+                prompt: text,
+                attachments: attachments
+            )
+        }
+    }
+
+    private func interruptCurrentTurn() {
+        Task {
+            await appModel.interruptTask(threadID: thread.threadID)
         }
     }
 

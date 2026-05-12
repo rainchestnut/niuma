@@ -141,7 +141,11 @@ struct NewTaskView: View {
                 Task {
                     await submit()
                 }
-            }
+            },
+            isTurnRunning: false,
+            queuedTaskCount: 0,
+            onSteer: nil,
+            onInterrupt: nil
         )
     }
 

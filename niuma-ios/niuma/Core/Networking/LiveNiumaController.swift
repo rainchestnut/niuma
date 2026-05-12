@@ -194,6 +194,55 @@ final class LiveNiumaController: NiumaControlling {
         try await sendWebSocket(taskStart)
     }
 
+    func sendTaskSteer(request: TaskSteerRequestData) async throws {
+        let businessPayload = ContentPartsPayload(
+            contentParts: request.contentParts ?? [ContentPart(kind: .text, text: request.prompt)]
+        )
+        let cryptoContext = try identityService.makePayloadCryptoContext(
+            peerPublicKey: request.agentEncryptionPublicKey,
+            bindingID: request.bindingID
+        )
+        let ciphertext = try PayloadCryptoService.encrypt(
+            plaintext: encoder.encode(businessPayload),
+            context: cryptoContext,
+            direction: .iosToAgent,
+            additionalData: LiveRealtimeEventDecoder.taskSteerAdditionalData(request)
+        )
+        let signature = try identityService.makeTaskSteerSignature(
+            deviceID: request.deviceID,
+            agentID: request.agentID,
+            threadID: request.threadID,
+            ciphertext: ciphertext
+        )
+        try await sendWebSocket(
+            LiveTaskSteerMessage(
+                kind: "task_steer",
+                deviceID: request.deviceID,
+                agentID: request.agentID,
+                threadID: request.threadID,
+                ciphertext: ciphertext,
+                signature: signature
+            )
+        )
+    }
+
+    func interruptTask(request: TaskInterruptRequestData) async throws {
+        let signature = try identityService.makeTaskInterruptSignature(
+            deviceID: request.deviceID,
+            agentID: request.agentID,
+            threadID: request.threadID
+        )
+        try await sendWebSocket(
+            LiveTaskInterruptMessage(
+                kind: "task_interrupt",
+                deviceID: request.deviceID,
+                agentID: request.agentID,
+                threadID: request.threadID,
+                signature: signature
+            )
+        )
+    }
+
     func requestMetadataRefresh(request: MetadataRefreshRequestData) async throws {
         logger.info("mobile_ws_metadata_refresh_send request_id=\(request.requestID, privacy: .public)")
         try await sendWebSocket(

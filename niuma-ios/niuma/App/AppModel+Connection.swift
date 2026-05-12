@@ -340,6 +340,25 @@ extension AppModel {
                 pendingError = result.error ?? "thread rename failed"
             }
 
+        case .taskQueueSync(let sync):
+            if sync.queuedCount > 0 {
+                queuedTaskCountsByThread[sync.threadID] = sync.queuedCount
+            } else {
+                queuedTaskCountsByThread.removeValue(forKey: sync.threadID)
+            }
+
+        case .taskSteerResult(let result):
+            if !result.succeeded {
+                pendingError = result.error ?? "task steer failed"
+            }
+
+        case .taskInterruptResult(let result):
+            if result.succeeded {
+                runtimeState = .idle
+            } else {
+                pendingError = result.error ?? "task interrupt failed"
+            }
+
         case .approvalRequest(let approval):
             runtimeState = .waitingApproval
             if let index = approvals.firstIndex(where: { $0.approvalID == approval.approvalID }) {

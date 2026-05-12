@@ -214,6 +214,35 @@ enum LiveRealtimeEventDecoder {
                     error: result.error
                 )
             )
+        case "task_queue_sync":
+            let sync = try decoder.decode(LiveTaskQueueSyncMessage.self, from: data)
+            return .taskQueueSync(
+                TaskQueueSync(
+                    threadID: sync.threadID,
+                    queuedCount: sync.queuedCount,
+                    status: sync.status
+                )
+            )
+        case "task_steer_sync":
+            let result = try decoder.decode(LiveTaskActionSyncMessage.self, from: data)
+            return .taskSteerResult(
+                TaskActionResult(
+                    requestID: result.requestID,
+                    threadID: result.threadID,
+                    succeeded: result.succeeded,
+                    error: result.error
+                )
+            )
+        case "task_interrupt_sync":
+            let result = try decoder.decode(LiveTaskActionSyncMessage.self, from: data)
+            return .taskInterruptResult(
+                TaskActionResult(
+                    requestID: result.requestID,
+                    threadID: result.threadID,
+                    succeeded: result.succeeded,
+                    error: result.error
+                )
+            )
         case "approval_request":
             let approval = try decoder.decode(LiveApprovalRequestMessage.self, from: data)
             let approvalPlaintext = try PayloadCryptoService.decrypt(
@@ -335,6 +364,15 @@ enum LiveRealtimeEventDecoder {
             ("device_id", request.deviceID),
             ("agent_id", request.agentID),
             ("project_id", request.projectID),
+            ("thread_id", request.threadID)
+        ])
+    }
+
+    nonisolated static func taskSteerAdditionalData(_ request: TaskSteerRequestData) -> Data {
+        PayloadCryptoService.additionalData([
+            ("kind", "task_steer"),
+            ("device_id", request.deviceID),
+            ("agent_id", request.agentID),
             ("thread_id", request.threadID)
         ])
     }

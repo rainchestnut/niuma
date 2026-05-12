@@ -40,6 +40,12 @@ pub(crate) struct TurnStartPayload<'a> {
     pub(crate) sandbox_mode: Option<&'a str>,
 }
 
+/// Complete Codex `turn/steer` payload for appending input to a running turn.
+pub(crate) struct TurnSteerPayload<'a> {
+    pub(crate) thread_id: &'a str,
+    pub(crate) input_items: Vec<Value>,
+}
+
 #[derive(Clone)]
 pub struct CodexAppServerClient {
     inner: Arc<CodexAppServerInner>,
@@ -342,6 +348,19 @@ impl CodexAppServerClient {
             .context("turn/start response missing turn")
     }
 
+    /// Steer the currently running turn with additional Codex-native input.
+    pub async fn steer_turn_payload(&self, payload: TurnSteerPayload<'_>) -> Result<Value> {
+        let params = turn_steer_params(payload);
+        self.request("turn/steer", params).await
+    }
+
+    /// Interrupt the currently running turn for one Codex thread.
+    pub async fn interrupt_turn(&self, thread_id: &str) -> Result<()> {
+        self.request("turn/interrupt", json!({ "threadId": thread_id }))
+            .await?;
+        Ok(())
+    }
+
     /// Ask Codex for model metadata when the app-server exposes it.
     pub async fn model_state(&self) -> ModelState {
         for method in ["model/list", "models/list"] {
@@ -581,6 +600,13 @@ fn turn_start_params(payload: TurnStartPayload<'_>) -> Value {
     params
 }
 
+fn turn_steer_params(payload: TurnSteerPayload<'_>) -> Value {
+    json!({
+        "threadId": payload.thread_id,
+        "input": payload.input_items,
+    })
+}
+
 fn thread_start_params(
     cwd: Option<&str>,
     approval_policy: Option<&str>,
@@ -720,6 +746,18 @@ mod tests {
         assert_eq!(thread["approvalPolicy"], "never");
         assert_eq!(thread["sandbox"], "danger-full-access");
         assert_eq!(thread["cwd"], "/tmp/workspace");
+    }
+
+    #[test]
+    fn turn_steer_params_follow_app_server_shape() {
+        let params = turn_steer_params(TurnSteerPayload {
+            thread_id: "thread-1",
+            input_items: vec![json!({ "type": "text", "text": "adjust course" })],
+        });
+
+        assert_eq!(params["threadId"], "thread-1");
+        assert_eq!(params["input"][0]["text"], "adjust course");
+        assert!(params.get("message_mode").is_none());
     }
 
     #[test]

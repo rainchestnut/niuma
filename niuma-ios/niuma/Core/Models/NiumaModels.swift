@@ -627,6 +627,19 @@ nonisolated struct ThreadRenameResult: Hashable {
     let error: String?
 }
 
+nonisolated struct TaskQueueSync: Hashable {
+    let threadID: String
+    let queuedCount: Int
+    let status: String?
+}
+
+nonisolated struct TaskActionResult: Hashable {
+    let requestID: String?
+    let threadID: String
+    let succeeded: Bool
+    let error: String?
+}
+
 nonisolated struct ApprovalResponseFailure: Hashable {
     let approvalID: String
     let error: String
@@ -649,6 +662,9 @@ nonisolated enum RealtimeEvent: Hashable {
     case branchChangesResult(BranchChangesResult)
     case threadArchiveResult(ThreadArchiveResult)
     case threadRenameResult(ThreadRenameResult)
+    case taskQueueSync(TaskQueueSync)
+    case taskSteerResult(TaskActionResult)
+    case taskInterruptResult(TaskActionResult)
     case approvalRequest(ApprovalSummary)
     case approvalResponseFailed(ApprovalResponseFailure)
     case userInputRequest(UserInputRequestSummary)

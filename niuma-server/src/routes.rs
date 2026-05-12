@@ -793,6 +793,16 @@ async fn handle_mobile_text(
             payload["source"] = json!("mobile");
             route_to_agent_or_error(state, tx, &query.agent_id, payload, None).await
         }
+        "task_steer" => {
+            validate_task_steer(state, &payload, &query.device_id, &query.agent_id).await?;
+            payload["source"] = json!("mobile");
+            route_to_agent_or_error(state, tx, &query.agent_id, payload, None).await
+        }
+        "task_interrupt" => {
+            validate_task_interrupt(state, &payload, &query.device_id, &query.agent_id).await?;
+            payload["source"] = json!("mobile");
+            route_to_agent_or_error(state, tx, &query.agent_id, payload, None).await
+        }
         "resume_thread" => {
             payload["device_id"] = json!(query.device_id);
             payload["source"] = json!("mobile");
@@ -1079,6 +1089,24 @@ async fn route_to_agent_or_error(
             }),
         );
     }
+    if !delivered && (kind == "task_steer" || kind == "task_interrupt") {
+        let sync_kind = if kind == "task_steer" {
+            "task_steer_sync"
+        } else {
+            "task_interrupt_sync"
+        };
+        send_json(
+            tx,
+            json!({
+                "kind": sync_kind,
+                "request_id": empty_to_null(&request_id),
+                "device_id": device_id,
+                "thread_id": thread_id,
+                "succeeded": false,
+                "error": "desktop agent is offline",
+            }),
+        );
+    }
     Ok(())
 }
 
@@ -1106,6 +1134,59 @@ async fn validate_task_start(
         Ok(())
     } else {
         Err("task_start signature invalid".to_string())
+    }
+}
+
+async fn validate_task_steer(
+    state: &AppState,
+    payload: &Value,
+    device_id: &str,
+    agent_id: &str,
+) -> Result<(), String> {
+    if value_str_ws(payload, "device_id")? != device_id
+        || value_str_ws(payload, "agent_id")? != agent_id
+    {
+        return Err("message routing mismatch".to_string());
+    }
+    let thread_id = value_str_ws(payload, "thread_id")?;
+    let ciphertext = value_str_ws(payload, "ciphertext")?;
+    let signature = value_str_ws(payload, "signature")?;
+    let digest = crypto::task_steer_digest(device_id, agent_id, thread_id, ciphertext);
+    verify_mobile_signature(state, device_id, &digest, signature, "task_steer").await
+}
+
+async fn validate_task_interrupt(
+    state: &AppState,
+    payload: &Value,
+    device_id: &str,
+    agent_id: &str,
+) -> Result<(), String> {
+    if value_str_ws(payload, "device_id")? != device_id
+        || value_str_ws(payload, "agent_id")? != agent_id
+    {
+        return Err("message routing mismatch".to_string());
+    }
+    let thread_id = value_str_ws(payload, "thread_id")?;
+    let signature = value_str_ws(payload, "signature")?;
+    let digest = crypto::task_interrupt_digest(device_id, agent_id, thread_id);
+    verify_mobile_signature(state, device_id, &digest, signature, "task_interrupt").await
+}
+
+async fn verify_mobile_signature(
+    state: &AppState,
+    device_id: &str,
+    digest: &str,
+    signature: &str,
+    kind: &str,
+) -> Result<(), String> {
+    let public_key = db::public_key(&state.pool, device_id)
+        .await
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "unknown device_id".to_string())?;
+    if crypto::verify_ed25519(&public_key, digest, signature) {
+        Ok(())
+    } else {
+        Err(format!("{kind} signature invalid"))
     }
 }
 
@@ -1166,6 +1247,9 @@ async fn handle_agent_text(
         | "thread_archive_failed"
         | "thread_rename_result"
         | "thread_rename_failed"
+        | "task_queue_sync"
+        | "task_steer_sync"
+        | "task_interrupt_sync"
         | "approval_request"
         | "approval_response_failed"
         | "user_input_request"
@@ -1638,6 +1722,54 @@ mod tests {
         assert_eq!(routed["request_id"], "rename-1");
         assert_eq!(routed["device_id"], "ios-device");
         assert_eq!(routed["thread_id"], "thread-1");
+        assert_eq!(routed["error"], "desktop agent is offline");
+    }
+
+    #[tokio::test]
+    async fn mobile_task_steer_reports_offline_gateway() {
+        let state = test_state();
+        let (mobile_tx, mut mobile_rx) = mpsc::unbounded_channel();
+        let request = json!({
+            "kind": "task_steer",
+            "request_id": "steer-1",
+            "device_id": "ios-device",
+            "thread_id": "thread-1"
+        });
+
+        route_to_agent_or_error(&state, &mobile_tx, "agent-offline", request, None)
+            .await
+            .expect("offline steer request reports failure to mobile");
+
+        let routed = recv_json(&mut mobile_rx).await;
+        assert_eq!(routed["kind"], "task_steer_sync");
+        assert_eq!(routed["request_id"], "steer-1");
+        assert_eq!(routed["device_id"], "ios-device");
+        assert_eq!(routed["thread_id"], "thread-1");
+        assert_eq!(routed["succeeded"], false);
+        assert_eq!(routed["error"], "desktop agent is offline");
+    }
+
+    #[tokio::test]
+    async fn mobile_task_interrupt_reports_offline_gateway() {
+        let state = test_state();
+        let (mobile_tx, mut mobile_rx) = mpsc::unbounded_channel();
+        let request = json!({
+            "kind": "task_interrupt",
+            "request_id": "interrupt-1",
+            "device_id": "ios-device",
+            "thread_id": "thread-1"
+        });
+
+        route_to_agent_or_error(&state, &mobile_tx, "agent-offline", request, None)
+            .await
+            .expect("offline interrupt request reports failure to mobile");
+
+        let routed = recv_json(&mut mobile_rx).await;
+        assert_eq!(routed["kind"], "task_interrupt_sync");
+        assert_eq!(routed["request_id"], "interrupt-1");
+        assert_eq!(routed["device_id"], "ios-device");
+        assert_eq!(routed["thread_id"], "thread-1");
+        assert_eq!(routed["succeeded"], false);
         assert_eq!(routed["error"], "desktop agent is offline");
     }
 
