@@ -46,7 +46,6 @@ struct SettingsView: View {
                     VStack(alignment: .leading, spacing: 12) {
                         settingsRow(title: appModel.localized("settings.device.name"), value: appModel.identity?.displayName ?? appModel.localized("device_state.uninitialized"))
                         settingsRow(title: appModel.localized("settings.device.id"), value: appModel.identity?.deviceID ?? appModel.localized("common.unavailable"), monospaced: true)
-                        settingsRow(title: appModel.localized("settings.control_plane"), value: appModel.controllerModeLabel)
                     }
                 }
 
