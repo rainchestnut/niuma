@@ -1240,102 +1240,6 @@
         }
       }
     },
-    "thread.interrupt.action" : {
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Interrupt Current Task"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "中断当前任务"
-          }
-        }
-      }
-    },
-    "thread.queue.action" : {
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Queue Message"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "排队发送"
-          }
-        }
-      }
-    },
-    "thread.queue.count" : {
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "%lld Queued"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "已排队 %lld 条"
-          }
-        }
-      }
-    },
-    "thread.running.controls" : {
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Running Task Controls"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "运行中任务控制"
-          }
-        }
-      }
-    },
-    "thread.steer.accessibility" : {
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Steer Current Task"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "引导当前任务"
-          }
-        }
-      }
-    },
-    "thread.steer.action" : {
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Steer"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "引导"
-          }
-        }
-      }
-    },
     "common.unavailable" : {
       "extractionState" : "stale",
       "localizations" : {
@@ -1705,22 +1609,6 @@
         }
       }
     },
-    "error.user_input_not_pending" : {
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "This input request is no longer pending. Refresh the session and try again."
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "该输入请求已不在待处理状态，请刷新会话后重试。"
-          }
-        }
-      }
-    },
     "error.invalid_pair_payload" : {
       "localizations" : {
         "en" : {
@@ -1941,6 +1829,22 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "附件传输标识与本地校验结果不一致，请重试。"
+          }
+        }
+      }
+    },
+    "error.user_input_not_pending" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "This input request is no longer pending. Refresh the session and try again."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "该输入请求已不在待处理状态，请刷新会话后重试。"
           }
         }
       }
@@ -4709,6 +4613,23 @@
         }
       }
     },
+    "thread.interrupt.action" : {
+      "extractionState" : "stale",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Interrupt Current Task"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "中断当前任务"
+          }
+        }
+      }
+    },
     "thread.permissions.accessibility" : {
       "extractionState" : "stale",
       "localizations" : {
@@ -4845,6 +4766,40 @@
         }
       }
     },
+    "thread.queue.action" : {
+      "extractionState" : "stale",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Queue Message"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "排队发送"
+          }
+        }
+      }
+    },
+    "thread.queue.count" : {
+      "extractionState" : "stale",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%lld Queued"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "已排队 %lld 条"
+          }
+        }
+      }
+    },
     "thread.reasoning.accessibility" : {
       "extractionState" : "stale",
       "localizations" : {
@@ -4875,6 +4830,57 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "刷新会话"
+          }
+        }
+      }
+    },
+    "thread.running.controls" : {
+      "extractionState" : "stale",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Running Task Controls"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "运行中任务控制"
+          }
+        }
+      }
+    },
+    "thread.steer.accessibility" : {
+      "extractionState" : "stale",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Steer Current Task"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "引导当前任务"
+          }
+        }
+      }
+    },
+    "thread.steer.action" : {
+      "extractionState" : "stale",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Steer"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "引导"
           }
         }
       }
