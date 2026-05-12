@@ -315,7 +315,9 @@ extension AppModel {
 
         case .metadataRefreshResult(let result):
             logger.info("metadata_refresh_result request_id=\(result.requestID, privacy: .public) succeeded=\(result.succeeded, privacy: .public)")
-            if !result.succeeded {
+            if result.succeeded, let threadIDs = result.threadIDs, let agentID = selectedAgent?.agentID {
+                reconcileThreadSnapshot(threadIDs: Set(threadIDs), agentID: agentID)
+            } else if !result.succeeded {
                 pendingError = result.error ?? "metadata refresh failed"
             }
 

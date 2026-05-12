@@ -1027,7 +1027,16 @@ async fn archive_thread_payload(
     inbound: &ThreadArchiveRequest,
 ) -> Result<Vec<Value>> {
     let app_server = app_server.context("codex app-server is unavailable")?;
-    app_server.archive_thread(&inbound.thread_id).await?;
+    if let Err(err) = app_server.archive_thread(&inbound.thread_id).await {
+        if !is_missing_rollout_error(&err, &inbound.thread_id) {
+            return Err(err);
+        }
+        warn!(
+            thread_id = %inbound.thread_id,
+            request_id = %inbound.request_id,
+            "thread_archive_source_missing_treating_as_archived"
+        );
+    }
     let mut messages = vec![thread_archive_result_wire(inbound)];
     messages.extend(
         metadata_syncs_for_thread_id(
@@ -1039,6 +1048,33 @@ async fn archive_thread_payload(
         .await?,
     );
     Ok(messages)
+}
+
+/// Builds the terminal marker for an authoritative metadata snapshot.
+fn metadata_refresh_completed_wire(
+    inbound: &MetadataRefreshMessage,
+    snapshot: &metadata::MetadataSnapshot,
+) -> Value {
+    let thread_ids: Vec<&str> = snapshot
+        .threads
+        .iter()
+        .map(|thread| thread.thread_id.as_str())
+        .collect();
+    json!({
+        "kind": "metadata_refresh_completed",
+        "device_id": inbound.device_id,
+        "request_id": inbound.request_id,
+        "project_count": snapshot.projects.len(),
+        "thread_count": snapshot.threads.len(),
+        "thread_ids": thread_ids,
+        "approval_count": 0,
+    })
+}
+
+fn is_missing_rollout_error(error: &anyhow::Error, thread_id: &str) -> bool {
+    error
+        .to_string()
+        .contains(&format!("no rollout found for thread id {thread_id}"))
 }
 
 /// Builds the plain acknowledgement for a successful mobile archive request.
@@ -1911,18 +1947,7 @@ where
             for message in metadata::snapshot_wire_messages(&snapshot) {
                 send_wire_message(writer, message).await?;
             }
-            send_wire_message(
-                writer,
-                json!({
-                    "kind": "metadata_refresh_completed",
-                    "device_id": inbound.device_id,
-                    "request_id": inbound.request_id,
-                    "project_count": snapshot.projects.len(),
-                    "thread_count": snapshot.threads.len(),
-                    "approval_count": 0,
-                }),
-            )
-            .await?;
+            send_wire_message(writer, metadata_refresh_completed_wire(&inbound, &snapshot)).await?;
             info!(
                 request_id = %inbound.request_id,
                 device_id = %inbound.device_id,
@@ -3277,16 +3302,21 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::Arc;
 
+    use anyhow::anyhow;
     use serde_json::json;
     use tokio::sync::RwLock;
 
+    use crate::codex_app_server::ModelState;
+    use crate::metadata::{MetadataSnapshot, ThreadSummary};
+
     use super::{
         ActiveThread, ApprovalResponseInbound, McpElicitationField, McpElicitationResponseFormat,
-        McpElicitationValueKind, PendingApproval, PendingUserInput, ThreadArchiveRequest,
-        ThreadRenameRequest, UserInputClaim, UserInputResponseFormat, UserInputResponseInbound,
-        agent_ws_url, apply_turn_lifecycle_notification, build_mcp_elicitation_request,
-        claim_task_progress_push, claim_user_input_request, handle_approval_response,
-        handle_user_input_response, mark_user_input_completed, task_progress_push_marker,
+        McpElicitationValueKind, MetadataRefreshMessage, PendingApproval, PendingUserInput,
+        ThreadArchiveRequest, ThreadRenameRequest, UserInputClaim, UserInputResponseFormat,
+        UserInputResponseInbound, agent_ws_url, apply_turn_lifecycle_notification,
+        build_mcp_elicitation_request, claim_task_progress_push, claim_user_input_request,
+        handle_approval_response, handle_user_input_response, is_missing_rollout_error,
+        mark_user_input_completed, metadata_refresh_completed_wire, task_progress_push_marker,
         thread_archive_failed_wire, thread_archive_result_wire, thread_rename_failed_wire,
         thread_rename_result_wire, thread_sync_completed, user_input_app_server_response,
     };
@@ -3373,6 +3403,45 @@ mod tests {
                 .and_then(|value| value.as_u64()),
             Some(2)
         );
+    }
+
+    #[test]
+    fn metadata_refresh_completion_carries_authoritative_thread_ids() {
+        let inbound = MetadataRefreshMessage {
+            request_id: "metadata-1".to_string(),
+            device_id: "ios-device".to_string(),
+        };
+        let snapshot = MetadataSnapshot {
+            projects: Vec::new(),
+            threads: vec![ThreadSummary {
+                thread_id: "thread-1".to_string(),
+                project_id: "project-1".to_string(),
+                title: "Thread".to_string(),
+                status: "completed".to_string(),
+                last_checkpoint_seen: None,
+                current_branch: None,
+                updated_at: None,
+            }],
+            model_state: ModelState {
+                current_model: None,
+                available_models: Vec::new(),
+            },
+        };
+
+        let completion = metadata_refresh_completed_wire(&inbound, &snapshot);
+
+        assert_eq!(completion["kind"], "metadata_refresh_completed");
+        assert_eq!(completion["request_id"], "metadata-1");
+        assert_eq!(completion["thread_ids"], json!(["thread-1"]));
+    }
+
+    #[test]
+    fn missing_rollout_archive_error_is_classified_by_thread_id() {
+        let error =
+            anyhow!(r#"{{"code":-32600,"message":"no rollout found for thread id thread-1"}}"#);
+
+        assert!(is_missing_rollout_error(&error, "thread-1"));
+        assert!(!is_missing_rollout_error(&error, "thread-2"));
     }
 
     #[test]

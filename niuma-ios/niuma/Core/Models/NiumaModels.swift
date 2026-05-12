@@ -599,6 +599,7 @@ nonisolated struct LocalAttachmentPayload: Hashable {
 nonisolated struct MetadataRefreshResult: Hashable {
     let requestID: String
     let succeeded: Bool
+    let threadIDs: [String]?
     let error: String?
 }
 

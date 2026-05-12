@@ -13,11 +13,29 @@ extension AppModel {
 
     /// Removes an archived Codex thread from all mobile-local projections.
     func deleteArchivedThread(_ thread: ThreadSummary) {
-        for projectID in Array(threadsByProject.keys) {
-            threadsByProject[projectID]?.removeAll { $0.threadID == thread.threadID }
+        deleteThreadProjection(threadID: thread.threadID)
+    }
+
+    /// Removes selected-gateway rows that no longer exist in Codex's full metadata snapshot.
+    func reconcileThreadSnapshot(threadIDs liveThreadIDs: Set<String>, agentID: String) {
+        let staleThreadIDs = Set(
+            threadsByProject.values
+                .flatMap { $0 }
+                .filter { $0.agentID == agentID && !liveThreadIDs.contains($0.threadID) }
+                .map(\.threadID)
+        )
+        for threadID in staleThreadIDs {
+            deleteThreadProjection(threadID: threadID)
         }
-        clearThreadRuntimeState(threadID: thread.threadID)
-        dataStore.deleteThreadCascade(threadID: thread.threadID)
+    }
+
+    /// Deletes a thread row and its local-only detail cache by canonical thread id.
+    func deleteThreadProjection(threadID: String) {
+        for projectID in Array(threadsByProject.keys) {
+            threadsByProject[projectID]?.removeAll { $0.threadID == threadID }
+        }
+        clearThreadRuntimeState(threadID: threadID)
+        dataStore.deleteThreadCascade(threadID: threadID)
         localAttachments = dataStore.loadLocalAttachments()
     }
 

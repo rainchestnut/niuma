@@ -279,9 +279,11 @@ nonisolated struct LiveTransferReadyMessage: Decodable {
 
 nonisolated struct LiveMetadataRefreshCompletedMessage: Decodable {
     let requestID: String
+    let threadIDs: [String]?
 
     enum CodingKeys: String, CodingKey {
         case requestID = "request_id"
+        case threadIDs = "thread_ids"
     }
 }
 

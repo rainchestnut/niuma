@@ -120,6 +120,7 @@ enum LiveRealtimeEventDecoder {
                 MetadataRefreshResult(
                     requestID: result.requestID,
                     succeeded: true,
+                    threadIDs: result.threadIDs,
                     error: nil
                 )
             )
@@ -129,6 +130,7 @@ enum LiveRealtimeEventDecoder {
                 MetadataRefreshResult(
                     requestID: result.requestID,
                     succeeded: false,
+                    threadIDs: nil,
                     error: result.error
                 )
             )
