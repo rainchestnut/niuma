@@ -216,6 +216,30 @@ struct AgentChannelRuntime {
     channel_status: Arc<RwLock<AgentChannelStatus>>,
 }
 
+/// Runtime dependencies for executing a mobile task immediately in Codex.
+struct TaskStartContext<'a> {
+    identity: &'a AgentIdentity,
+    app_server: CodexAppServerClient,
+    active_threads: Arc<RwLock<HashMap<String, ActiveThread>>>,
+    transfer_context: Option<TransferContext>,
+}
+
+/// Metadata used only to report task-start failures back to mobile diagnostics.
+struct TaskStartFailureContext<'a> {
+    fallback_thread_id: &'a str,
+    request_id: Option<&'a str>,
+    project_id: &'a str,
+}
+
+/// Runtime dependencies for forwarding blocking Codex app-server requests.
+struct AppServerRequestContext<'a> {
+    identity: &'a AgentIdentity,
+    active_threads: Arc<RwLock<HashMap<String, ActiveThread>>>,
+    pending_approvals: Arc<RwLock<HashMap<String, PendingApproval>>>,
+    pending_user_inputs: Arc<RwLock<HashMap<String, PendingUserInput>>>,
+    completed_user_inputs: Arc<RwLock<HashMap<String, CompletedUserInput>>>,
+}
+
 /// Keep the authenticated agent WebSocket online in the background.
 pub fn spawn_agent_channel(
     identity: AgentIdentity,
@@ -531,14 +555,18 @@ where
 
     start_task_now(
         writer,
-        identity,
-        app_server,
-        active_threads,
-        transfer_context,
+        TaskStartContext {
+            identity,
+            app_server,
+            active_threads,
+            transfer_context,
+        },
         inbound,
-        &fallback_thread_id,
-        request_id.as_deref(),
-        &project_id,
+        TaskStartFailureContext {
+            fallback_thread_id: &fallback_thread_id,
+            request_id: request_id.as_deref(),
+            project_id: &project_id,
+        },
     )
     .await?;
     Ok(())
@@ -546,14 +574,9 @@ where
 
 async fn start_task_now<S, E>(
     writer: &mut S,
-    identity: &AgentIdentity,
-    app_server: CodexAppServerClient,
-    active_threads: Arc<RwLock<HashMap<String, ActiveThread>>>,
-    transfer_context: Option<TransferContext>,
+    context: TaskStartContext<'_>,
     inbound: TaskStartInbound,
-    fallback_thread_id: &str,
-    request_id: Option<&str>,
-    project_id: &str,
+    failure: TaskStartFailureContext<'_>,
 ) -> Result<()>
 where
     S: Sink<Message, Error = E> + Unpin,
@@ -561,20 +584,24 @@ where
 {
     let device_id = inbound.device_id.clone();
     let requested_thread_id = inbound.thread_id.clone();
-    match TaskRuntime::new(identity.clone(), app_server, transfer_context.clone())
-        .start_task_messages(inbound)
-        .await
+    match TaskRuntime::new(
+        context.identity.clone(),
+        context.app_server,
+        context.transfer_context.clone(),
+    )
+    .start_task_messages(inbound)
+    .await
     {
         Ok(messages) => {
             if let Some(thread_id) = requested_thread_id {
-                mark_thread_running(active_threads.clone(), &thread_id, None).await;
+                mark_thread_running(context.active_threads.clone(), &thread_id, None).await;
             }
             send_wire_messages(
                 writer,
-                identity,
+                context.identity,
                 messages,
-                active_threads,
-                transfer_context.as_ref(),
+                context.active_threads,
+                context.transfer_context.as_ref(),
             )
             .await?;
         }
@@ -582,16 +609,16 @@ where
             send_wire_message(
                 writer,
                 encrypt_task_update(
-                    identity,
-                    task_error_update(&device_id, fallback_thread_id, &err.to_string()),
+                    context.identity,
+                    task_error_update(&device_id, failure.fallback_thread_id, &err.to_string()),
                 )?,
             )
             .await?;
             warn!(
-                request_id = %request_id.unwrap_or(""),
+                request_id = %failure.request_id.unwrap_or(""),
                 device_id = %device_id,
-                project_id = %project_id,
-                thread_id = %fallback_thread_id,
+                project_id = %failure.project_id,
+                thread_id = %failure.fallback_thread_id,
                 "task_start_failed: {err:#}"
             );
         }
@@ -1124,11 +1151,13 @@ where
         handle_app_server_request(
             writer,
             runtime.codex_app_server.clone(),
-            &runtime.identity,
-            runtime.active_threads.clone(),
-            runtime.pending_approvals.clone(),
-            runtime.pending_user_inputs.clone(),
-            runtime.completed_user_inputs.clone(),
+            AppServerRequestContext {
+                identity: &runtime.identity,
+                active_threads: runtime.active_threads.clone(),
+                pending_approvals: runtime.pending_approvals.clone(),
+                pending_user_inputs: runtime.pending_user_inputs.clone(),
+                completed_user_inputs: runtime.completed_user_inputs.clone(),
+            },
             event,
         )
         .await?;
@@ -1290,14 +1319,18 @@ where
     .await?;
     start_task_now(
         writer,
-        &runtime.identity,
-        app_server,
-        runtime.active_threads.clone(),
-        runtime.transfer_context.clone(),
+        TaskStartContext {
+            identity: &runtime.identity,
+            app_server,
+            active_threads: runtime.active_threads.clone(),
+            transfer_context: runtime.transfer_context.clone(),
+        },
         inbound,
-        &fallback_thread_id,
-        request_id.as_deref(),
-        &project_id,
+        TaskStartFailureContext {
+            fallback_thread_id: &fallback_thread_id,
+            request_id: request_id.as_deref(),
+            project_id: &project_id,
+        },
     )
     .await
 }
@@ -1505,11 +1538,7 @@ async fn handle_transfer_ready(
 async fn handle_app_server_request<S, E>(
     writer: &mut S,
     codex_app_server: Option<CodexAppServerClient>,
-    identity: &AgentIdentity,
-    active_threads: Arc<RwLock<HashMap<String, ActiveThread>>>,
-    pending_approvals: Arc<RwLock<HashMap<String, PendingApproval>>>,
-    pending_user_inputs: Arc<RwLock<HashMap<String, PendingUserInput>>>,
-    completed_user_inputs: Arc<RwLock<HashMap<String, CompletedUserInput>>>,
+    context: AppServerRequestContext<'_>,
     request: Value,
 ) -> Result<()>
 where
@@ -1528,17 +1557,8 @@ where
     let params = request.get("params").cloned().unwrap_or_else(|| json!({}));
     if method == "item/tool/requestUserInput" {
         if let Some((message, pending)) = build_user_input_request(&request_id, &params).await {
-            forward_user_input_request_once(
-                writer,
-                app_server.clone(),
-                identity,
-                active_threads.clone(),
-                pending_user_inputs.clone(),
-                completed_user_inputs.clone(),
-                message,
-                pending,
-            )
-            .await?;
+            forward_user_input_request_once(writer, &app_server, &context, message, pending)
+                .await?;
         } else {
             app_server
                 .respond_error(request_id, -32600, "invalid request_user_input payload")
@@ -1549,17 +1569,8 @@ where
     if method == "mcpServer/elicitation/request" {
         if let Some((message, pending)) = build_mcp_elicitation_request(&request_id, &params).await
         {
-            forward_user_input_request_once(
-                writer,
-                app_server.clone(),
-                identity,
-                active_threads.clone(),
-                pending_user_inputs.clone(),
-                completed_user_inputs.clone(),
-                message,
-                pending,
-            )
-            .await?;
+            forward_user_input_request_once(writer, &app_server, &context, message, pending)
+                .await?;
         } else {
             app_server
                 .respond_error(request_id, -32600, "invalid mcp elicitation payload")
@@ -1571,16 +1582,17 @@ where
         if let Some((message, pending)) =
             build_approval_request(&request_id, &method, approval_type, &params).await
         {
-            pending_approvals
+            context
+                .pending_approvals
                 .write()
                 .await
                 .insert(pending.approval_id.clone(), pending);
             if let Some(device_id) =
-                active_device_for_thread(&active_threads, &message.thread_id).await
+                active_device_for_thread(&context.active_threads, &message.thread_id).await
             {
                 send_wire_message(
                     writer,
-                    approval_request_wire(identity, &device_id, &message)?,
+                    approval_request_wire(context.identity, &device_id, &message)?,
                 )
                 .await?;
             }
@@ -1605,11 +1617,8 @@ where
 
 async fn forward_user_input_request_once<S, E>(
     writer: &mut S,
-    app_server: CodexAppServerClient,
-    identity: &AgentIdentity,
-    active_threads: Arc<RwLock<HashMap<String, ActiveThread>>>,
-    pending_user_inputs: Arc<RwLock<HashMap<String, PendingUserInput>>>,
-    completed_user_inputs: Arc<RwLock<HashMap<String, CompletedUserInput>>>,
+    app_server: &CodexAppServerClient,
+    context: &AppServerRequestContext<'_>,
     message: UserInputWireData,
     pending: PendingUserInput,
 ) -> Result<()>
@@ -1617,8 +1626,12 @@ where
     S: Sink<Message, Error = E> + Unpin,
     E: std::error::Error + Send + Sync + 'static,
 {
-    match claim_user_input_request(pending_user_inputs, completed_user_inputs, pending.clone())
-        .await
+    match claim_user_input_request(
+        context.pending_user_inputs.clone(),
+        context.completed_user_inputs.clone(),
+        pending.clone(),
+    )
+    .await
     {
         UserInputClaim::New => {}
         UserInputClaim::AlreadyPending => return Ok(()),
@@ -1630,10 +1643,12 @@ where
         }
         UserInputClaim::AlreadyCompleted(None) => return Ok(()),
     }
-    if let Some(device_id) = active_device_for_thread(&active_threads, &message.thread_id).await {
+    if let Some(device_id) =
+        active_device_for_thread(&context.active_threads, &message.thread_id).await
+    {
         send_wire_message(
             writer,
-            user_input_request_wire(identity, &device_id, &message)?,
+            user_input_request_wire(context.identity, &device_id, &message)?,
         )
         .await?;
     }
@@ -1651,10 +1666,10 @@ async fn claim_user_input_request(
     {
         let mut completed = completed_user_inputs.write().await;
         prune_completed_user_inputs(&mut completed);
-        if let Some(completed) = completed.get(&pending.request_id) {
-            if completed.matches(&pending) {
-                return UserInputClaim::AlreadyCompleted(completed.response_payload.clone());
-            }
+        if let Some(completed) = completed.get(&pending.request_id)
+            && completed.matches(&pending)
+        {
+            return UserInputClaim::AlreadyCompleted(completed.response_payload.clone());
         }
     }
 
