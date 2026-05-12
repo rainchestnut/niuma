@@ -1609,6 +1609,22 @@
         }
       }
     },
+    "error.user_input_not_pending" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "This input request is no longer pending. Refresh the session and try again."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "该输入请求已不在待处理状态，请刷新会话后重试。"
+          }
+        }
+      }
+    },
     "error.invalid_pair_payload" : {
       "localizations" : {
         "en" : {

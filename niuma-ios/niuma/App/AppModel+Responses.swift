@@ -44,11 +44,14 @@ extension AppModel {
         userInputResponseFailures[requestID]
     }
 
-    func respondToUserInput(_ request: UserInputRequestSummary, answers: [String: [String]]) async {
-        guard let identity, let selectedAgent else { return }
-        guard currentUserInputRequest(request.requestID)?.status == .pending
-            || currentUserInputRequest(request.requestID)?.status == .failed
-        else { return }
+    func respondToUserInput(_ request: UserInputRequestSummary, answers: [String: [String]]) async throws {
+        guard let identity else { throw AppModelError.missingDeviceIdentity }
+        guard let selectedAgent else { throw AppModelError.missingAgentBinding }
+        guard let currentRequest = currentUserInputRequest(request.requestID),
+              currentRequest.status == .pending || currentRequest.status == .failed
+        else {
+            throw AppModelError.userInputNotPending
+        }
         do {
             let controller = try requireController()
             _ = try await authenticate(identity: identity, agent: selectedAgent)
@@ -68,6 +71,7 @@ extension AppModel {
             updateUserInputStatus(requestID: request.requestID, status: .failed)
             userInputResponseFailures[request.requestID] = error.localizedDescription
             pendingError = error.localizedDescription
+            throw error
         }
     }
 

@@ -70,18 +70,17 @@ struct ThreadView: View {
 
     var body: some View {
         let snapshot = currentRenderSnapshot
-        let timelineRows = ThreadTimelineRow.merge(items: snapshot.items, approvals: pendingApprovals)
+        let timelineRows = ThreadTimelineRow.merge(
+            items: snapshot.items,
+            approvals: pendingApprovals,
+            userInputs: pendingUserInputs
+        )
         ScrollViewReader { proxy in
             ScrollView {
                 VStack(alignment: .leading, spacing: 14) {
                     runtimeStrip
 
                     VStack(spacing: 10) {
-                        ForEach(pendingUserInputs) { request in
-                            UserInputPromptRow(request: request)
-                                .id("user-input-\(request.requestID)")
-                        }
-
                         ForEach(timelineRows) { row in
                             switch row {
                             case .processGroup(let group):
@@ -98,6 +97,9 @@ struct ThreadView: View {
                                     .id(row.id)
                             case .approval(let approval):
                                 ApprovalTimelineRow(approval: approval)
+                                    .id(row.id)
+                            case .userInput(let request):
+                                UserInputPromptRow(request: request)
                                     .id(row.id)
                             }
                         }
