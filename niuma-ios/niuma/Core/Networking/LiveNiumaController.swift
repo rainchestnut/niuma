@@ -77,16 +77,6 @@ final class LiveNiumaController: NiumaControlling {
         try await send(.post, path: "/devices/push-token", body: request)
     }
 
-    func fetchDesktopPairingPayload() async throws -> PairCodePayload {
-        guard let url = URL(
-            string: "/api/pairing/payload",
-            relativeTo: desktopGatewayBaseURL
-        )?.absoluteURL else {
-            throw URLError(.badURL)
-        }
-        return try await sendUnauthenticatedAbsolute(url: url)
-    }
-
     /// Opens the authenticated WebSocket and continuously consumes server events for the selected agent.
     func connectRealtime(deviceID: String, agent: PairedAgent, sessionToken: String) async throws -> AsyncThrowingStream<RealtimeEvent, Error> {
         webSocketTask?.cancel(with: .goingAway, reason: nil)
@@ -502,26 +492,6 @@ final class LiveNiumaController: NiumaControlling {
         }
     }
 
-    /// Used for the local desktop gateway dashboard which is intentionally
-    /// unauthenticated and may live outside the primary server base URL.
-    private func sendUnauthenticatedAbsolute<Response: Decodable>(
-        url: URL
-    ) async throws -> Response {
-        var request = URLRequest(url: url)
-        request.httpMethod = HTTPMethod.get.rawValue
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.timeoutInterval = 3
-
-        let (data, response) = try await session.data(for: request)
-        guard let httpResponse = response as? HTTPURLResponse else {
-            throw URLError(.badServerResponse)
-        }
-        guard (200..<300).contains(httpResponse.statusCode) else {
-            throw Self.httpError(statusCode: httpResponse.statusCode, data: data)
-        }
-        return try decoder.decode(Response.self, from: data)
-    }
-
     /// Converts FastAPI error bodies into typed transport errors used by app state recovery.
     /// - Parameters:
     ///   - statusCode: HTTP status code returned by niuma-server.
@@ -532,10 +502,6 @@ final class LiveNiumaController: NiumaControlling {
             ?? String(data: data, encoding: .utf8)
             ?? "unknown error"
         return NiumaHTTPError(statusCode: statusCode, detail: detail)
-    }
-
-    private var desktopGatewayBaseURL: URL {
-        return URL(string: "http://127.0.0.1:8765")!
     }
 
     private var websocketBaseURL: URL {

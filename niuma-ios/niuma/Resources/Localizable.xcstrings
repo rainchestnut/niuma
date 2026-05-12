@@ -2443,13 +2443,13 @@
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Open the camera and pairing will start as soon as the desktop QR code is recognized."
+            "value" : "Tap Scan to Pair to open the camera. Pairing starts as soon as the desktop QR code is recognized."
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "点击按钮打开相机，识别到桌面二维码后会自动完成配对。"
+            "value" : "点击“扫码配对”打开相机，识别到桌面二维码后会自动完成配对。"
           }
         }
       }
@@ -2505,19 +2505,104 @@
         }
       }
     },
-    "pairing.debug.current_qr" : {
+    "pairing.manual.action" : {
       "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Simulate Current Desktop QR Scan"
+            "value" : "Pair with Pairing Info"
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "模拟扫码当前桌面二维码"
+            "value" : "使用配对信息配对"
+          }
+        }
+      }
+    },
+    "pairing.manual.confirm" : {
+      "extractionState" : "stale",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Confirm Pairing"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "确认配对"
+          }
+        }
+      }
+    },
+    "pairing.manual.empty" : {
+      "extractionState" : "stale",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Enter pairing information first."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "请先输入配对信息。"
+          }
+        }
+      }
+    },
+    "pairing.manual.instructions" : {
+      "extractionState" : "stale",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Paste the full pairing JSON from the desktop Gateway QR code."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "粘贴桌面 Gateway 二维码中的完整配对 JSON。"
+          }
+        }
+      }
+    },
+    "pairing.manual.placeholder" : {
+      "extractionState" : "stale",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Paste pairing JSON here"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "在这里粘贴配对 JSON"
+          }
+        }
+      }
+    },
+    "pairing.manual.title" : {
+      "extractionState" : "stale",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Pair with Pairing Info"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "使用配对信息配对"
           }
         }
       }
@@ -2698,13 +2783,30 @@
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Enter the same Niuma Server address used by the desktop Gateway, then apply it before pairing."
+            "value" : "Enter the same Niuma Server address used by the desktop Gateway. The app applies it when pairing starts."
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "请输入与桌面 Gateway 相同的 Niuma Server 地址，应用后再扫码配对。"
+            "value" : "请输入与桌面 Gateway 相同的 Niuma Server 地址，开始配对时会自动应用。"
+          }
+        }
+      }
+    },
+    "pairing.server.required" : {
+      "extractionState" : "stale",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Enter the Niuma Server address before pairing."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "请先输入 Niuma Server 服务地址。"
           }
         }
       }
@@ -2722,23 +2824,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "正在完成桌面绑定…"
-          }
-        }
-      }
-    },
-    "pairing.status.debug_pairing" : {
-      "extractionState" : "stale",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Reading the desktop Gateway QR code and completing pairing..."
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "正在读取桌面 Gateway 二维码并完成绑定…"
           }
         }
       }

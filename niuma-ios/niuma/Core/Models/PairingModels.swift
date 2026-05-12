@@ -31,7 +31,7 @@ nonisolated struct PairCodePayload: Codable, Hashable {
 }
 
 /// Decodes a raw QR-string into a `PairCodePayload`. Used by both the camera
-/// scanner callback and any future deep-link / paste-buffer entry points.
+/// scanner callback and the manual pairing-info entry point.
 nonisolated enum PairCodePayloadDecoder {
     /// Decodes a scanned QR string into a typed pair-code payload.
     static func decode(_ raw: String) throws -> PairCodePayload {

@@ -5,12 +5,17 @@ import UIKit
 struct PairingView: View {
     @Environment(AppModel.self) private var appModel
     @Environment(\.dismiss) private var dismiss
+    @FocusState private var isServerEndpointFocused: Bool
     @State private var cameraStatus: AVAuthorizationStatus = AVCaptureDevice.authorizationStatus(for: .video)
     @State private var isShowingScanner = false
+    @State private var isShowingManualPairing = false
+    @State private var serverEndpointDraft = ""
+    @State private var serverEndpointStatusMessage: String?
     @State private var submittedScanRaw: String?
     @State private var isPairing = false
     @State private var pairingStatusMessage: String?
     @State private var scannerErrorMessage: String?
+    @State private var manualPairingErrorMessage: String?
 
     let dismissOnSuccess: Bool
 
@@ -28,7 +33,7 @@ struct PairingView: View {
                     VStack(alignment: .leading, spacing: 18) {
                         gatewaySummary
 
-                        ServerEndpointEditor(helpText: appModel.localized("pairing.server.help"))
+                        serverEndpointSection
 
                         Divider()
                             .overlay(NiumaPalette.border)
@@ -36,14 +41,7 @@ struct PairingView: View {
                         cameraSection
 
                         #if DEBUG
-                        Button(isPairing ? appModel.localized("pairing.connecting") : appModel.localized("pairing.debug.current_qr")) {
-                            Task { await runDesktopDebugPair() }
-                        }
-                        .buttonStyle(.bordered)
-                        .controlSize(.large)
-                        .frame(maxWidth: .infinity)
-                        .disabled(isPairing)
-                        .accessibilityIdentifier("pairing-debug-current-qr-button")
+                        manualPairingButton
                         #endif
 
                         if let pairingStatusMessage {
@@ -61,6 +59,13 @@ struct PairingView: View {
         .niumaScreenBackground()
         .navigationTitle(appModel.localized("pairing.title"))
         .navigationBarTitleDisplayMode(.inline)
+        .onAppear {
+            syncServerEndpointDraft()
+        }
+        .onChange(of: appModel.serverBaseURLText) { _, nextValue in
+            guard !isServerEndpointFocused else { return }
+            serverEndpointDraft = nextValue
+        }
         .task {
             // Re-check status on entry so we react to permission changes that
             // happened while the user was in Settings.
@@ -80,6 +85,18 @@ struct PairingView: View {
                 onScan: handleScan
             )
             .interactiveDismissDisabled(isPairing)
+        }
+        .sheet(isPresented: $isShowingManualPairing) {
+            ManualPairingSheet(
+                isPairing: isPairing,
+                statusMessage: pairingStatusMessage,
+                errorMessage: manualPairingErrorMessage,
+                language: appModel.appLanguage,
+                onConfirm: handleManualPair
+            )
+            .interactiveDismissDisabled(isPairing)
+            .presentationDetents([.medium, .large])
+            .presentationDragIndicator(.visible)
         }
     }
 
@@ -111,6 +128,69 @@ struct PairingView: View {
                 .font(.footnote)
                 .foregroundStyle(NiumaPalette.mutedInk)
                 .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
+    #if DEBUG
+    private var manualPairingButton: some View {
+        Button {
+            openManualPairingSheet()
+        } label: {
+            Label(
+                isPairing
+                    ? appModel.localized("pairing.connecting")
+                    : appModel.localized("pairing.manual.action"),
+                systemImage: "doc.text"
+            )
+            .font(.headline.weight(.semibold))
+            .foregroundStyle(NiumaPalette.accent)
+            .padding(.horizontal, 18)
+            .padding(.vertical, 14)
+            .frame(maxWidth: .infinity)
+            .background(
+                RoundedRectangle(cornerRadius: 22, style: .continuous)
+                    .fill(NiumaPalette.accentSoft.opacity(0.76))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 22, style: .continuous)
+                    .stroke(NiumaPalette.accent.opacity(0.28), lineWidth: 1)
+            )
+        }
+        .buttonStyle(.plain)
+        .disabled(isPairing)
+        .opacity(isPairing ? 0.64 : 1)
+        .accessibilityIdentifier("pairing-manual-payload-button")
+    }
+    #endif
+
+    private var serverEndpointSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text(appModel.localized("pairing.server.help"))
+                .font(.footnote)
+                .foregroundStyle(NiumaPalette.mutedInk)
+                .fixedSize(horizontal: false, vertical: true)
+
+            TextField(appModel.serverBaseURLPlaceholder, text: $serverEndpointDraft)
+                .keyboardType(.URL)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+                .textContentType(.URL)
+                .focused($isServerEndpointFocused)
+                .submitLabel(.done)
+                .niumaInputChrome()
+                .onSubmit {
+                    Task { await applyServerEndpointDraftIfNeeded() }
+                }
+
+            if let validation = appModel.serverBaseURLValidationMessage {
+                Text(validation)
+                    .font(.footnote)
+                    .foregroundStyle(NiumaPalette.critical)
+            } else if let serverEndpointStatusMessage {
+                Text(serverEndpointStatusMessage)
+                    .font(.footnote)
+                    .foregroundStyle(NiumaPalette.mutedInk)
             }
         }
     }
@@ -157,6 +237,10 @@ struct PairingView: View {
         scannerErrorMessage = nil
         pairingStatusMessage = nil
         submittedScanRaw = nil
+        guard await applyServerEndpointDraftIfNeeded() else {
+            scannerErrorMessage = serverEndpointFailureMessage
+            return
+        }
         switch cameraStatus {
         case .authorized:
             isShowingScanner = true
@@ -173,30 +257,53 @@ struct PairingView: View {
         guard submittedScanRaw != raw, !isPairing else { return }
         submittedScanRaw = raw
         scannerErrorMessage = nil
-        Task { await confirmPair(raw: raw) }
+        Task { await confirmScannedPair(raw: raw) }
     }
 
-    private func confirmPair(raw: String) async {
-        guard !isPairing else { return }
-        isPairing = true
-        defer { isPairing = false }
-        pairingStatusMessage = appModel.localized("pairing.status.confirming")
-        let paired = await appModel.pairWithScannedPayload(raw)
+    private func confirmScannedPair(raw: String) async {
+        let paired = await confirmPairing(raw: raw)
         if paired {
             isShowingScanner = false
         } else {
             submittedScanRaw = nil
-            scannerErrorMessage = appModel.pendingError ?? appModel.localized("pairing.scan.invalid")
+            scannerErrorMessage = pairingFailureMessage
         }
         await finishPairingIfNeeded(paired: paired)
     }
 
-    private func runDesktopDebugPair() async {
+    private func openManualPairingSheet() {
+        pairingStatusMessage = nil
+        manualPairingErrorMessage = nil
+        isShowingManualPairing = true
+    }
+
+    private func handleManualPair(_ raw: String) {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            manualPairingErrorMessage = appModel.localized("pairing.manual.empty")
+            return
+        }
+        manualPairingErrorMessage = nil
+        Task { await confirmManualPair(raw: trimmed) }
+    }
+
+    private func confirmManualPair(raw: String) async {
+        let paired = await confirmPairing(raw: raw)
+        if paired {
+            isShowingManualPairing = false
+        } else {
+            manualPairingErrorMessage = pairingFailureMessage
+        }
+        await finishPairingIfNeeded(paired: paired)
+    }
+
+    private func confirmPairing(raw: String) async -> Bool {
+        guard !isPairing else { return false }
+        guard await applyServerEndpointDraftIfNeeded() else { return false }
         isPairing = true
         defer { isPairing = false }
-        pairingStatusMessage = appModel.localized("pairing.status.debug_pairing")
-        let paired = await appModel.pairWithDesktopGateway()
-        await finishPairingIfNeeded(paired: paired)
+        pairingStatusMessage = appModel.localized("pairing.status.confirming")
+        return await appModel.pairWithScannedPayload(raw)
     }
 
     /// Requests camera access and optionally opens the scanner after authorization.
@@ -213,6 +320,41 @@ struct PairingView: View {
         UIApplication.shared.open(url)
     }
 
+    private var pairingFailureMessage: String {
+        appModel.pendingError
+            ?? appModel.serverBaseURLValidationMessage
+            ?? serverEndpointStatusMessage
+            ?? appModel.localized("pairing.scan.invalid")
+    }
+
+    private var serverEndpointFailureMessage: String {
+        appModel.serverBaseURLValidationMessage ?? appModel.localized("pairing.server.required")
+    }
+
+    private func syncServerEndpointDraft() {
+        serverEndpointDraft = appModel.serverBaseURLText
+    }
+
+    /// Applies the endpoint lazily so pairing no longer needs a separate
+    /// "apply server address" button on the same screen.
+    @discardableResult
+    private func applyServerEndpointDraftIfNeeded() async -> Bool {
+        let trimmed = serverEndpointDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            appModel.serverBaseURLValidationMessage = nil
+            serverEndpointStatusMessage = appModel.localized("pairing.server.required")
+            return false
+        }
+
+        let applied = await appModel.updateServerBaseURL(from: trimmed)
+        serverEndpointStatusMessage = applied ? appModel.localized("settings.server.applied") : nil
+        if applied {
+            serverEndpointDraft = appModel.serverBaseURLText
+            isServerEndpointFocused = false
+        }
+        return applied
+    }
+
     @MainActor
     private func finishPairingIfNeeded(paired: Bool) async {
         guard paired else {
@@ -224,6 +366,93 @@ struct PairingView: View {
         if dismissOnSuccess {
             dismiss()
         }
+    }
+}
+
+/// Manual DEBUG entry point for pasting the exact QR payload when the simulator
+/// cannot scan a camera frame.
+private struct ManualPairingSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    @FocusState private var isInputFocused: Bool
+    @State private var pairingInfo = ""
+
+    let isPairing: Bool
+    let statusMessage: String?
+    let errorMessage: String?
+    let language: AppLanguage
+    let onConfirm: (String) -> Void
+
+    var body: some View {
+        NavigationStack {
+            VStack(alignment: .leading, spacing: 16) {
+                Text(L10n.string("pairing.manual.instructions", language: language))
+                    .font(.footnote)
+                    .foregroundStyle(NiumaPalette.mutedInk)
+
+                pairingInfoEditor
+
+                if let message = errorMessage ?? statusMessage {
+                    Text(message)
+                        .font(.footnote)
+                        .foregroundStyle(errorMessage == nil ? NiumaPalette.mutedInk : NiumaPalette.critical)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                Button {
+                    onConfirm(pairingInfo)
+                } label: {
+                    if isPairing {
+                        ProgressView()
+                            .tint(NiumaPalette.darkButtonText)
+                    } else {
+                        Text(L10n.string("pairing.manual.confirm", language: language))
+                    }
+                }
+                .buttonStyle(NiumaPrimaryButtonStyle())
+                .disabled(isPairing)
+            }
+            .padding(20)
+            .navigationTitle(L10n.string("pairing.manual.title", language: language))
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button(L10n.string("common.cancel", language: language)) {
+                        dismiss()
+                    }
+                    .disabled(isPairing)
+                }
+            }
+            .onAppear {
+                isInputFocused = true
+            }
+        }
+        .niumaScreenBackground()
+    }
+
+    private var pairingInfoEditor: some View {
+        ZStack(alignment: .topLeading) {
+            if pairingInfo.isEmpty {
+                Text(L10n.string("pairing.manual.placeholder", language: language))
+                    .font(.body)
+                    .foregroundStyle(NiumaPalette.mutedInk)
+                    .padding(.horizontal, 18)
+                    .padding(.vertical, 16)
+            }
+
+            TextEditor(text: $pairingInfo)
+                .font(.system(.body, design: .monospaced))
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+                .focused($isInputFocused)
+                .scrollContentBackground(.hidden)
+                .padding(10)
+        }
+        .frame(minHeight: 220)
+        .background(NiumaPalette.raisedCard, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .stroke(NiumaPalette.border, lineWidth: 1)
+        )
     }
 }
 

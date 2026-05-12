@@ -39,10 +39,6 @@ protocol NiumaControlling: AnyObject {
     /// - Returns: Server acknowledgement that the token was stored for this iOS device.
     func updatePushToken(request: PushTokenUpdateRequestData) async throws -> PushTokenUpdateResponseData
 
-    /// Reads the current desktop gateway payload from the local pairing page.
-    /// - Returns: `PairCodePayload` identical to the QR payload shown by the gateway dashboard.
-    func fetchDesktopPairingPayload() async throws -> PairCodePayload
-
     /// Opens the realtime WebSocket for the paired device and agent.
     /// - Parameters:
     ///   - deviceID: Registered iOS device id that owns the connection.

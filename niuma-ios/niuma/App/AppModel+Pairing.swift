@@ -20,20 +20,6 @@ extension AppModel {
         }
     }
 
-    /// Pairs with the local desktop gateway dashboard payload.
-    func pairWithDesktopGateway() async -> Bool {
-        pendingError = nil
-        do {
-            let controller = try requireController()
-            let payload = try await controller.fetchDesktopPairingPayload()
-            return await pair(payload: payload)
-        } catch {
-            deviceState = .pairFailed
-            pendingError = error.localizedDescription
-            return false
-        }
-    }
-
     /// Completes pairing from a decoded desktop payload.
     func pair(payload: PairCodePayload) async -> Bool {
         do {
