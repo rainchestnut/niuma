@@ -8,14 +8,16 @@ design documents that define their boundaries.
 
 ## Direct Use
 
-Use the released channels when you only want to run Niuma:
+Use the current testing channels when you only want to run Niuma:
 
 The `niuma` CLI is not an AI agent. It is a desktop connector that lets the
 Niuma iOS app talk to Codex by starting or connecting to `codex app-server`.
 Install Codex before starting the Niuma gateway.
 
 1. Install Codex.app or the Codex CLI.
-2. Install the iOS app from the App Store.
+2. Install the iOS app while it is still in testing. Build it onto your iPhone
+   with Xcode, or email `rainchestnut@gmail.com` to request a TestFlight test
+   link.
 3. Install the desktop gateway:
 
 ```bash
@@ -123,8 +125,10 @@ files or a secret manager.
 
 ## iOS App
 
-The iOS app is a native SwiftUI project. For normal use, install the published
-app from the App Store. For source development:
+The iOS app is a native SwiftUI project and is still in testing. To use it on
+an iPhone, either build and run the project from Xcode with your device
+selected, or email `rainchestnut@gmail.com` to request a TestFlight test link.
+For source development and simulator checks:
 
 ```bash
 cd niuma-ios

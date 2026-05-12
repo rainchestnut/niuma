@@ -2,6 +2,12 @@
 
 该目录用于承载 Niuma iOS 客户端工程。
 
+## 测试安装
+
+iOS app 目前仍处于测试阶段。需要安装到 iPhone 时，请通过 Xcode 打开
+`niuma.xcodeproj`，选择真机和签名团队后自行编译运行；也可以发送邮件到
+`rainchestnut@gmail.com` 获取 TestFlight 测试链接。
+
 ## 运行与构建
 
 ```bash
