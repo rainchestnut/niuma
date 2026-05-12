@@ -124,7 +124,10 @@ pub(crate) fn replay_events_from_thread(
                 phase: None,
             });
         }
-        let created_at = number_field(&turn, "startedAt").or(context.updated_at);
+        // Codex app-server exposes absolute timestamps at the turn level, not
+        // per item. Use the terminal turn time for display; in-flight turns
+        // intentionally omit a timestamp instead of falling back to start time.
+        let created_at = number_field(&turn, "completedAt");
         for entry in entries {
             seq += 1;
             if seq <= cursor {
@@ -225,7 +228,7 @@ pub(crate) fn fallback_started_turn_event(
         phase: None,
         project_id: context.project_id.clone(),
         entry_id: Some(turn_id.to_string()),
-        created_at: context.updated_at,
+        created_at: None,
     }
 }
 
@@ -936,5 +939,55 @@ mod tests {
         assert_eq!(part["files"], 2);
         assert_eq!(part["additions"], 2);
         assert_eq!(part["deletions"], 2);
+    }
+
+    #[test]
+    fn replay_events_use_turn_completed_at_for_display_time() {
+        let thread = json!({
+            "id": "thread-1",
+            "updatedAt": 99.0,
+            "turns": [{
+                "id": "turn-1",
+                "startedAt": 10.0,
+                "completedAt": 20.0,
+                "items": [{
+                    "id": "final",
+                    "type": "agentMessage",
+                    "phase": "final_answer",
+                    "text": "done"
+                }]
+            }]
+        });
+        let context = thread_context(&thread, None);
+        let events = replay_events_from_thread(&thread, 0, &context);
+
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].created_at, Some(20.0));
+    }
+
+    #[test]
+    fn replay_events_omit_display_time_until_turn_completed() {
+        let thread = json!({
+            "id": "thread-1",
+            "updatedAt": 99.0,
+            "turns": [{
+                "id": "turn-1",
+                "startedAt": 10.0,
+                "items": [{
+                    "id": "progress",
+                    "type": "agentMessage",
+                    "text": "working"
+                }]
+            }]
+        });
+        let context = thread_context(&thread, None);
+        let events = replay_events_from_thread(&thread, 0, &context);
+
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].created_at, None);
+        assert_eq!(
+            fallback_started_turn_event(&context, "turn-1", "hello").created_at,
+            None
+        );
     }
 }

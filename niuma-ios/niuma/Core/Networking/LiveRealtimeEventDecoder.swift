@@ -96,7 +96,7 @@ enum LiveRealtimeEventDecoder {
                         type: update.type,
                         phase: update.phase,
                         text: content.text,
-                        createdAt: update.createdAt.map(Date.init(timeIntervalSince1970:)) ?? .now,
+                        createdAt: update.createdAt.map(Date.init(timeIntervalSince1970:)),
                         seq: update.seq,
                         contentParts: content.parts
                     )

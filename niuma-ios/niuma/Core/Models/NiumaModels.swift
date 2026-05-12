@@ -481,7 +481,7 @@ nonisolated struct ThreadEntry: Codable, Identifiable, Hashable {
     let type: String
     let phase: String?
     let text: String
-    let createdAt: Date
+    let createdAt: Date?
     let seq: Int
     let contentParts: [ContentPart]?
 
@@ -491,7 +491,7 @@ nonisolated struct ThreadEntry: Codable, Identifiable, Hashable {
         type: String,
         phase: String? = nil,
         text: String,
-        createdAt: Date,
+        createdAt: Date?,
         seq: Int,
         contentParts: [ContentPart]? = nil
     ) {
