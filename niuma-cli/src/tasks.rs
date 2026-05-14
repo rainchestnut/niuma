@@ -190,7 +190,11 @@ impl TaskRuntime {
     }
 
     /// Steer a running Codex turn with mobile-originated additional input.
-    pub async fn steer_task(&self, message: TaskSteerInbound) -> Result<()> {
+    pub async fn steer_task(
+        &self,
+        message: TaskSteerInbound,
+        expected_turn_id: &str,
+    ) -> Result<()> {
         let plaintext = self.decrypt_mobile_steer_payload(&message)?;
         let input_items = self
             .decode_mobile_payload_to_codex_input(&message.device_id, &plaintext)
@@ -198,6 +202,7 @@ impl TaskRuntime {
         self.app_server
             .steer_turn_payload(TurnSteerPayload {
                 thread_id: &message.thread_id,
+                expected_turn_id,
                 input_items,
             })
             .await?;
