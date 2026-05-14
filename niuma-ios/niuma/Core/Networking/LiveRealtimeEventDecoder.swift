@@ -225,6 +225,16 @@ enum LiveRealtimeEventDecoder {
                     status: sync.status
                 )
             )
+        case "task_start_sync":
+            let result = try decoder.decode(LiveTaskActionSyncMessage.self, from: data)
+            return .taskStartResult(
+                TaskActionResult(
+                    requestID: result.requestID,
+                    threadID: result.threadID,
+                    succeeded: result.succeeded,
+                    error: result.error
+                )
+            )
         case "task_steer_sync":
             let result = try decoder.decode(LiveTaskActionSyncMessage.self, from: data)
             return .taskSteerResult(

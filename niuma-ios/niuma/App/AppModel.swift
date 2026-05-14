@@ -54,6 +54,7 @@ final class AppModel {
     @ObservationIgnored var realtimeTask: Task<Void, Never>?
     @ObservationIgnored var threadSyncResultTask: Task<Void, Never>?
     @ObservationIgnored var threadRefreshTimeoutTasks: [String: Task<Void, Never>] = [:]
+    @ObservationIgnored var pendingNewTaskPrompts: [String: PendingNewTaskPrompt] = [:]
     @ObservationIgnored var hasBootstrapped = false
     @ObservationIgnored let logger = Logger(subsystem: "com.rainchestnut.niuma", category: "realtime")
     @ObservationIgnored var serverBaseURL: URL?

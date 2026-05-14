@@ -130,6 +130,7 @@ struct PushTokenUpdateResponseData: Decodable {
 
 
 struct TaskStartRequestData: Encodable {
+    let requestID: String
     let deviceID: String
     let agentID: String
     let bindingID: String

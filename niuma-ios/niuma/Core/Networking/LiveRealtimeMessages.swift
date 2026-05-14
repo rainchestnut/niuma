@@ -19,6 +19,7 @@ nonisolated struct LiveRealtimeEnvelope: Decodable {
 
 nonisolated struct LiveTaskStartMessage: Encodable {
     let kind: String
+    let requestID: String
     let deviceID: String
     let agentID: String
     let projectID: String
@@ -33,6 +34,7 @@ nonisolated struct LiveTaskStartMessage: Encodable {
 
     enum CodingKeys: String, CodingKey {
         case kind
+        case requestID = "request_id"
         case deviceID = "device_id"
         case agentID = "agent_id"
         case projectID = "project_id"

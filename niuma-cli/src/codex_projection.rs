@@ -213,29 +213,6 @@ pub(crate) fn extract_turn_entries(turn: &Value, cwd: Option<&str>) -> Vec<Threa
     entries
 }
 
-pub(crate) fn fallback_started_turn_event(
-    context: &ThreadContext,
-    turn_id: &str,
-    mobile_payload: &str,
-) -> ThreadEvent {
-    ThreadEvent {
-        thread_id: context.thread_id.clone(),
-        seq: 1,
-        ciphertext: mobile_payload.to_string(),
-        checkpoint: Some(format!("turn:{turn_id}")),
-        role: "user".to_string(),
-        item_type: "userMessage".to_string(),
-        phase: None,
-        project_id: context.project_id.clone(),
-        entry_id: Some(turn_id.to_string()),
-        created_at: None,
-    }
-}
-
-pub(crate) fn should_emit_started_user_event(requested_thread_id: Option<&str>) -> bool {
-    requested_thread_id.is_none()
-}
-
 pub(crate) fn file_part_attachment_line(part: &Value) -> String {
     let name = string_field(part, "file_name")
         .or_else(|| string_field(part, "alt"))
@@ -985,9 +962,5 @@ mod tests {
 
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].created_at, None);
-        assert_eq!(
-            fallback_started_turn_event(&context, "turn-1", "hello").created_at,
-            None
-        );
     }
 }

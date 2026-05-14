@@ -349,6 +349,16 @@ extension AppModel {
                 queuedTaskCountsByThread.removeValue(forKey: sync.threadID)
             }
 
+        case .taskStartResult(let result):
+            if result.succeeded {
+                materializePendingNewTaskPrompt(result)
+            } else {
+                if let requestID = result.requestID {
+                    pendingNewTaskPrompts.removeValue(forKey: requestID)
+                }
+                pendingError = result.error ?? "task start failed"
+            }
+
         case .taskSteerResult(let result):
             if !result.succeeded {
                 pendingError = result.error ?? "task steer failed"

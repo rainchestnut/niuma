@@ -664,6 +664,7 @@ nonisolated enum RealtimeEvent: Hashable {
     case threadArchiveResult(ThreadArchiveResult)
     case threadRenameResult(ThreadRenameResult)
     case taskQueueSync(TaskQueueSync)
+    case taskStartResult(TaskActionResult)
     case taskSteerResult(TaskActionResult)
     case taskInterruptResult(TaskActionResult)
     case approvalRequest(ApprovalSummary)

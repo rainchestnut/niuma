@@ -169,6 +169,7 @@ final class LiveNiumaController: NiumaControlling {
         )
         let taskStart = LiveTaskStartMessage(
             kind: "task_start",
+            requestID: request.requestID,
             deviceID: request.deviceID,
             agentID: request.agentID,
             projectID: request.projectID,

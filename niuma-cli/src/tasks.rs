@@ -10,9 +10,8 @@ use serde_json::{Value, json};
 
 use crate::codex_app_server::{CodexAppServerClient, TurnStartPayload, TurnSteerPayload};
 use crate::codex_projection::{
-    fallback_started_turn_event, file_part_attachment_line, file_part_type,
-    metadata_messages_for_thread, replay_events_from_thread, should_emit_started_user_event,
-    string_field, thread_context,
+    file_part_attachment_line, file_part_type, metadata_messages_for_thread,
+    replay_events_from_thread, string_field, thread_context,
 };
 use crate::identity::AgentIdentity;
 use crate::metadata::CodexWorkspaceStore;
@@ -20,7 +19,7 @@ use crate::transfers::TransferContext;
 use crate::{bindings, crypto};
 
 #[cfg(test)]
-use crate::codex_projection::{ThreadContext, extract_turn_entries, item_mobile_ciphertext};
+use crate::codex_projection::{extract_turn_entries, item_mobile_ciphertext};
 
 const CONVERSATION_PROJECT_ID: &str = "__conversation__";
 
@@ -99,6 +98,15 @@ pub struct TaskRuntime {
     transfer_context: Option<TransferContext>,
 }
 
+#[derive(Debug)]
+pub struct TaskStartMessages {
+    pub thread_id: String,
+    pub turn_id: String,
+    pub device_id: String,
+    pub project_id: Option<String>,
+    pub messages: Vec<Value>,
+}
+
 impl TaskRuntime {
     /// Create a task runtime around the long-lived Codex app-server client.
     pub fn new(
@@ -115,7 +123,10 @@ impl TaskRuntime {
     }
 
     /// Start or resume a Codex thread, submit the mobile turn, and emit sync rows.
-    pub async fn start_task_messages(&self, message: TaskStartInbound) -> Result<Vec<Value>> {
+    pub async fn start_task_messages(
+        &self,
+        message: TaskStartInbound,
+    ) -> Result<TaskStartMessages> {
         let requested_thread_id = message.thread_id.as_deref();
         let (thread_payload, project_id) = match requested_thread_id {
             // Existing Codex threads already carry their own projectless/workspace
@@ -175,18 +186,21 @@ impl TaskRuntime {
             .unwrap_or(thread_payload);
         let context = thread_context(&replay_payload, project_id);
         let mut messages = metadata_messages_for_thread(&context);
-        if should_emit_started_user_event(requested_thread_id) {
-            let turn_checkpoint = format!("turn:{turn_id}");
-            let mut user_event = replay_events_from_thread(&replay_payload, 0, &context)
-                .into_iter()
-                .find(|event| {
-                    event.role == "user" && event.checkpoint.as_deref() == Some(&turn_checkpoint)
-                })
-                .unwrap_or_else(|| fallback_started_turn_event(&context, &turn_id, &plaintext));
-            user_event.ciphertext = plaintext;
-            messages.push(user_event.into_wire(&message.device_id));
+        if requested_thread_id.is_none() {
+            messages.push(task_start_sync(
+                &message.device_id,
+                message.request_id.as_deref(),
+                &thread_id,
+                None,
+            ));
         }
-        Ok(messages)
+        Ok(TaskStartMessages {
+            thread_id,
+            turn_id,
+            device_id: message.device_id,
+            project_id: context.project_id,
+            messages,
+        })
     }
 
     /// Steer a running Codex turn with mobile-originated additional input.
@@ -371,6 +385,24 @@ impl TaskRuntime {
     }
 }
 
+/// Acknowledges the mobile request once Codex has assigned the real thread id.
+fn task_start_sync(
+    device_id: &str,
+    request_id: Option<&str>,
+    thread_id: &str,
+    error: Option<String>,
+) -> Value {
+    let succeeded = error.is_none();
+    json!({
+        "kind": "task_start_sync",
+        "device_id": device_id,
+        "request_id": request_id,
+        "thread_id": thread_id,
+        "succeeded": succeeded,
+        "error": error,
+    })
+}
+
 fn task_project_route(
     project_id: &str,
     project: Option<crate::metadata::ProjectSummary>,
@@ -481,25 +513,13 @@ mod tests {
     }
 
     #[test]
-    fn fallback_user_event_uses_decrypted_mobile_payload() {
-        let context = ThreadContext {
-            thread_id: "thread-1".to_string(),
-            project_id: Some("project-1".to_string()),
-            cwd: None,
-            title: "Thread".to_string(),
-            status: "running".to_string(),
-            updated_at: Some(1_778_140_000.0),
-        };
+    fn task_start_sync_preserves_mobile_request_id() {
+        let sync = task_start_sync("device-1", Some("request-1"), "thread-1", None);
 
-        let event = fallback_started_turn_event(&context, "turn-1", "plain mobile payload");
-
-        assert_eq!(event.ciphertext, "plain mobile payload");
-    }
-
-    #[test]
-    fn existing_threads_rely_on_canonical_user_updates() {
-        assert!(!should_emit_started_user_event(Some("thread-1")));
-        assert!(should_emit_started_user_event(None));
+        assert_eq!(sync["kind"], "task_start_sync");
+        assert_eq!(sync["request_id"], "request-1");
+        assert_eq!(sync["thread_id"], "thread-1");
+        assert_eq!(sync["succeeded"], true);
     }
 
     #[test]

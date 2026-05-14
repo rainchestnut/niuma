@@ -1,5 +1,13 @@
 import Foundation
 
+/// Mobile-only prompt state waiting for the desktop gateway to mint a thread id.
+struct PendingNewTaskPrompt {
+    let projectID: String
+    let agentID: String
+    let prompt: String
+    let contentParts: [ContentPart]
+}
+
 extension AppModel {
     func insertTransientUserPrompt(
         threadID: String,
@@ -53,6 +61,26 @@ extension AppModel {
         for canonicalEntry in canonicalEntries where canonicalEntry.role == .user {
             _ = removeTransientUserPrompt(threadID: threadID, matching: canonicalEntry)
         }
+    }
+
+    /// Attaches a new-task prompt to the real thread id returned by the desktop gateway.
+    func materializePendingNewTaskPrompt(_ result: TaskActionResult) {
+        guard result.succeeded, let requestID = result.requestID else {
+            if let requestID = result.requestID {
+                pendingNewTaskPrompts.removeValue(forKey: requestID)
+            }
+            return
+        }
+        guard let pending = pendingNewTaskPrompts.removeValue(forKey: requestID) else {
+            return
+        }
+        _ = insertTransientUserPrompt(
+            threadID: result.threadID,
+            projectID: pending.projectID,
+            agentID: pending.agentID,
+            prompt: pending.prompt,
+            contentParts: pending.contentParts
+        )
     }
 
     /// Removes one local optimistic user prompt when sending fails before desktop receives it.

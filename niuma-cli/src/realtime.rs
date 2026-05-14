@@ -619,20 +619,40 @@ where
     .start_task_messages(inbound)
     .await
     {
-        Ok(messages) => {
-            if let Some(thread_id) = requested_thread_id {
-                mark_thread_running(context.active_threads.clone(), &thread_id, None).await;
+        Ok(started) => {
+            if requested_thread_id.is_some() {
+                mark_thread_running(context.active_threads.clone(), &started.thread_id, None).await;
+            } else {
+                track_started_task(
+                    context.active_threads.clone(),
+                    &started.thread_id,
+                    &started.device_id,
+                    started.project_id.clone(),
+                    Some(started.turn_id.clone()),
+                )
+                .await;
             }
             send_wire_messages(
                 writer,
                 context.identity,
-                messages,
+                started.messages,
                 context.active_threads,
                 context.transfer_context.as_ref(),
             )
             .await?;
         }
         Err(err) => {
+            send_wire_message(
+                writer,
+                task_action_sync(
+                    "task_start_sync",
+                    &device_id,
+                    failure.request_id,
+                    failure.fallback_thread_id,
+                    Some(err.to_string()),
+                ),
+            )
+            .await?;
             send_wire_message(
                 writer,
                 encrypt_task_update(
@@ -769,6 +789,34 @@ async fn mark_thread_running(
     if let Some(current) = active.get_mut(thread_id) {
         current.active_turn_id = turn_id.or_else(|| Some(ACTIVE_TURN_PENDING_SENTINEL.to_string()));
     }
+}
+
+/// Registers a newly minted Codex thread before canonical replay produces entries.
+async fn track_started_task(
+    active_threads: Arc<RwLock<HashMap<String, ActiveThread>>>,
+    thread_id: &str,
+    device_id: &str,
+    project_id: Option<String>,
+    turn_id: Option<String>,
+) {
+    let mut active = active_threads.write().await;
+    active
+        .entry(thread_id.to_string())
+        .and_modify(|current| {
+            current.device_id = device_id.to_string();
+            current.project_id = project_id.clone().or_else(|| current.project_id.clone());
+            current.active_turn_id = turn_id
+                .clone()
+                .or_else(|| Some(ACTIVE_TURN_PENDING_SENTINEL.to_string()));
+        })
+        .or_insert(ActiveThread {
+            device_id: device_id.to_string(),
+            cursor: 0,
+            checkpoint: None,
+            project_id,
+            active_turn_id: turn_id.or_else(|| Some(ACTIVE_TURN_PENDING_SENTINEL.to_string())),
+            last_pushed_completion: None,
+        });
 }
 
 /// Returns the live app-server turn id required by `turn/steer`.

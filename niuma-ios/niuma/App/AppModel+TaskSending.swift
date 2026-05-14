@@ -67,6 +67,7 @@ extension AppModel {
             sessionToken: sessionToken
         )
         let permissionOverrides = approvalPermissionOverrides()
+        let requestID = UUID().uuidString.lowercased()
         let transientThreadID: String?
         let transientEntryID: String?
         if let threadID {
@@ -80,6 +81,12 @@ extension AppModel {
             transientThreadID = inserted.threadID
             transientEntryID = inserted.entryID
         } else {
+            pendingNewTaskPrompts[requestID] = PendingNewTaskPrompt(
+                projectID: projectID,
+                agentID: selectedAgent.agentID,
+                prompt: prompt,
+                contentParts: contentParts
+            )
             transientThreadID = nil
             transientEntryID = nil
         }
@@ -88,6 +95,7 @@ extension AppModel {
             try await withTimeout(realtimeSendTimeout) { [self] in
                 try await controller.sendTaskStart(
                     request: TaskStartRequestData(
+                        requestID: requestID,
                         deviceID: identity.deviceID,
                         agentID: selectedAgent.agentID,
                         bindingID: selectedAgent.bindingID,
@@ -105,6 +113,7 @@ extension AppModel {
                 )
             }
         } catch {
+            pendingNewTaskPrompts.removeValue(forKey: requestID)
             if let transientThreadID, let transientEntryID {
                 removeTransientUserPrompt(threadID: transientThreadID, entryID: transientEntryID)
             }
