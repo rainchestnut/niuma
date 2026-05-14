@@ -32,6 +32,7 @@ use crate::transfers::{self, TransferContext, TransferReady, TransferStore};
 const CONVERSATION_PROJECT_ID: &str = "__conversation__";
 const COMPLETED_USER_INPUT_RETENTION: Duration = Duration::from_secs(30 * 60);
 const COMPLETED_USER_INPUT_LIMIT: usize = 128;
+const ACTIVE_TURN_PENDING_SENTINEL: &str = "mobile-started";
 
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct AgentChannelStatus {
@@ -406,6 +407,7 @@ where
                 writer,
                 &runtime.identity,
                 runtime.codex_app_server.clone(),
+                runtime.active_threads.clone(),
                 runtime.transfer_context.clone(),
                 inbound,
             )
@@ -630,6 +632,7 @@ async fn handle_task_steer<S, E>(
     writer: &mut S,
     identity: &AgentIdentity,
     codex_app_server: Option<CodexAppServerClient>,
+    active_threads: Arc<RwLock<HashMap<String, ActiveThread>>>,
     transfer_context: Option<TransferContext>,
     inbound: TaskSteerInbound,
 ) -> Result<()>
@@ -641,9 +644,14 @@ where
     let device_id = inbound.device_id.clone();
     let thread_id = inbound.thread_id.clone();
     let result = if let Some(app_server) = codex_app_server {
-        TaskRuntime::new(identity.clone(), app_server, transfer_context)
-            .steer_task(inbound)
-            .await
+        match expected_turn_id_for_steer(active_threads, &thread_id).await {
+            Ok(expected_turn_id) => {
+                TaskRuntime::new(identity.clone(), app_server, transfer_context)
+                    .steer_task(inbound, &expected_turn_id)
+                    .await
+            }
+            Err(error) => Err(error),
+        }
     } else {
         Err(anyhow::anyhow!("Codex app-server is not connected"))
     };
@@ -738,8 +746,30 @@ async fn mark_thread_running(
 ) {
     let mut active = active_threads.write().await;
     if let Some(current) = active.get_mut(thread_id) {
-        current.active_turn_id = turn_id.or_else(|| Some("mobile-started".to_string()));
+        current.active_turn_id = turn_id.or_else(|| Some(ACTIVE_TURN_PENDING_SENTINEL.to_string()));
     }
+}
+
+/// Returns the live app-server turn id required by `turn/steer`.
+async fn expected_turn_id_for_steer(
+    active_threads: Arc<RwLock<HashMap<String, ActiveThread>>>,
+    thread_id: &str,
+) -> Result<String> {
+    let active = active_threads.read().await;
+    let Some(turn_id) = active
+        .get(thread_id)
+        .and_then(|thread| thread.active_turn_id.as_deref())
+    else {
+        return Err(anyhow::anyhow!(
+            "current turn id is not synchronized yet; try again after task status updates"
+        ));
+    };
+    if turn_id == ACTIVE_TURN_PENDING_SENTINEL {
+        return Err(anyhow::anyhow!(
+            "current turn id is not synchronized yet; try again after task status updates"
+        ));
+    }
+    Ok(turn_id.to_string())
 }
 
 async fn mark_thread_idle(
@@ -3310,15 +3340,16 @@ mod tests {
     use crate::metadata::{MetadataSnapshot, ThreadSummary};
 
     use super::{
-        ActiveThread, ApprovalResponseInbound, McpElicitationField, McpElicitationResponseFormat,
-        McpElicitationValueKind, MetadataRefreshMessage, PendingApproval, PendingUserInput,
-        ThreadArchiveRequest, ThreadRenameRequest, UserInputClaim, UserInputResponseFormat,
-        UserInputResponseInbound, agent_ws_url, apply_turn_lifecycle_notification,
-        build_mcp_elicitation_request, claim_task_progress_push, claim_user_input_request,
-        handle_approval_response, handle_user_input_response, is_missing_rollout_error,
-        mark_user_input_completed, metadata_refresh_completed_wire, task_progress_push_marker,
-        thread_archive_failed_wire, thread_archive_result_wire, thread_rename_failed_wire,
-        thread_rename_result_wire, thread_sync_completed, user_input_app_server_response,
+        ACTIVE_TURN_PENDING_SENTINEL, ActiveThread, ApprovalResponseInbound, McpElicitationField,
+        McpElicitationResponseFormat, McpElicitationValueKind, MetadataRefreshMessage,
+        PendingApproval, PendingUserInput, ThreadArchiveRequest, ThreadRenameRequest,
+        UserInputClaim, UserInputResponseFormat, UserInputResponseInbound, agent_ws_url,
+        apply_turn_lifecycle_notification, build_mcp_elicitation_request, claim_task_progress_push,
+        claim_user_input_request, expected_turn_id_for_steer, handle_approval_response,
+        handle_user_input_response, is_missing_rollout_error, mark_user_input_completed,
+        metadata_refresh_completed_wire, task_progress_push_marker, thread_archive_failed_wire,
+        thread_archive_result_wire, thread_rename_failed_wire, thread_rename_result_wire,
+        thread_sync_completed, user_input_app_server_response,
     };
 
     #[test]
@@ -3607,6 +3638,50 @@ mod tests {
                 .and_then(|thread| thread.active_turn_id.as_deref()),
             None
         );
+    }
+
+    #[tokio::test]
+    async fn expected_turn_id_for_steer_requires_real_turn_id() {
+        let active_threads = Arc::new(RwLock::new(HashMap::from([(
+            "thread-1".to_string(),
+            ActiveThread {
+                device_id: "ios-device".to_string(),
+                cursor: 0,
+                checkpoint: None,
+                project_id: None,
+                active_turn_id: Some(ACTIVE_TURN_PENDING_SENTINEL.to_string()),
+                last_pushed_completion: None,
+            },
+        )])));
+
+        let error = expected_turn_id_for_steer(active_threads, "thread-1")
+            .await
+            .expect_err("sentinel turn id is not safe for turn/steer");
+        assert!(
+            error
+                .to_string()
+                .contains("current turn id is not synchronized yet")
+        );
+    }
+
+    #[tokio::test]
+    async fn expected_turn_id_for_steer_returns_active_turn_id() {
+        let active_threads = Arc::new(RwLock::new(HashMap::from([(
+            "thread-1".to_string(),
+            ActiveThread {
+                device_id: "ios-device".to_string(),
+                cursor: 0,
+                checkpoint: None,
+                project_id: None,
+                active_turn_id: Some("turn-1".to_string()),
+                last_pushed_completion: None,
+            },
+        )])));
+
+        let turn_id = expected_turn_id_for_steer(active_threads, "thread-1")
+            .await
+            .expect("real app-server turn id can steer");
+        assert_eq!(turn_id, "turn-1");
     }
 
     #[tokio::test]

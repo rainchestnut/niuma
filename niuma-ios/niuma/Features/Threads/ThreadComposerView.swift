@@ -7,7 +7,6 @@ struct ThreadComposerBar: View {
     @State private var speechTranscriber = ComposerSpeechTranscriber()
     @State private var isAttachmentPanelExpanded = false
     @State private var isIntelligencePickerExpanded = false
-    @State private var isShowingRunningActions = false
 
     let placeholder: String
     let attachments: [OutgoingAttachment]
@@ -46,10 +45,6 @@ struct ThreadComposerBar: View {
 
     private var canOpenRunningActions: Bool {
         isTurnRunning && !isSending && !speechTranscriber.isFinalizing
-    }
-
-    private var isPrimaryActionEnabled: Bool {
-        isTurnRunning ? canOpenRunningActions : canSubmitContent
     }
 
     var body: some View {
@@ -159,28 +154,7 @@ struct ThreadComposerBar: View {
                         .accessibilityLabel(appModel.localized(speechTranscriber.isRecording ? "thread.voice.stop" : "thread.voice.start"))
                         .accessibilityIdentifier("thread-voice-input-button")
 
-                        Button {
-                            handlePrimaryAction()
-                        } label: {
-                            Group {
-                                if isSending {
-                                    ProgressView()
-                                        .tint(.white)
-                                } else {
-                                    Image(systemName: isTurnRunning ? "ellipsis" : "arrow.up")
-                                        .font(.system(size: 16, weight: .bold))
-                                }
-                            }
-                            .foregroundStyle(.white)
-                            .frame(width: 34, height: 34)
-                            .background(Circle().fill(.black))
-                            .contentShape(Circle())
-                        }
-                        .buttonStyle(.plain)
-                        .disabled(!isPrimaryActionEnabled)
-                        .opacity(isPrimaryActionEnabled ? 1 : 0.45)
-                        .accessibilityLabel(primaryActionAccessibilityLabel)
-                        .accessibilityIdentifier("thread-send-button")
+                        primaryActionControl
                     }
                 }
                 .padding(.horizontal, 14)
@@ -213,51 +187,20 @@ struct ThreadComposerBar: View {
         .onDisappear {
             speechTranscriber.stop()
         }
-        .confirmationDialog(
-            composerCopy("thread.running.controls"),
-            isPresented: $isShowingRunningActions,
-            titleVisibility: .visible
-        ) {
-            Button(composerCopy("thread.steer.action")) {
-                steer()
-            }
-            .disabled(!canSubmitContent || onSteer == nil)
-
-            Button(queueActionTitle) {
-                send()
-            }
-            .disabled(!canSubmitContent)
-
-            Button(composerCopy("thread.interrupt.action"), role: .destructive) {
-                interrupt()
-            }
-            .disabled(onInterrupt == nil)
-
-            Button(appModel.localized("common.cancel"), role: .cancel) {}
-        }
     }
 
     /// Routes the trailing composer button without exposing running-session
     /// controls in the persistent configuration row.
     private func handlePrimaryAction() {
         if isTurnRunning {
-            openRunningActions()
+            isPromptFocused.wrappedValue = false
         } else {
             send()
         }
     }
 
-    private func openRunningActions() {
-        guard canOpenRunningActions else { return }
-        closeAttachmentPanel()
-        closeIntelligencePicker()
-        isPromptFocused.wrappedValue = false
-        isShowingRunningActions = true
-    }
-
     private func send() {
         guard canSubmitContent else { return }
-        isShowingRunningActions = false
         closeAttachmentPanel()
         closeIntelligencePicker()
         speechTranscriber.stop()
@@ -267,7 +210,6 @@ struct ThreadComposerBar: View {
 
     private func steer() {
         guard canSubmitContent, onSteer != nil else { return }
-        isShowingRunningActions = false
         closeAttachmentPanel()
         closeIntelligencePicker()
         speechTranscriber.stop()
@@ -277,7 +219,6 @@ struct ThreadComposerBar: View {
 
     private func interrupt() {
         guard onInterrupt != nil else { return }
-        isShowingRunningActions = false
         closeAttachmentPanel()
         closeIntelligencePicker()
         speechTranscriber.stop()
@@ -422,6 +363,68 @@ struct ThreadComposerBar: View {
         .buttonStyle(.plain)
         .accessibilityLabel(appModel.localized("thread.permissions.accessibility"))
         .accessibilityIdentifier("thread-permission-menu")
+    }
+
+    @ViewBuilder
+    private var primaryActionControl: some View {
+        if isTurnRunning {
+            Menu {
+                Button {
+                    steer()
+                } label: {
+                    Label(composerCopy("thread.steer.action"), systemImage: "arrow.triangle.turn.up.right.circle")
+                }
+                .disabled(!canSubmitContent || onSteer == nil)
+
+                Button {
+                    send()
+                } label: {
+                    Label(queueActionTitle, systemImage: "text.badge.plus")
+                }
+                .disabled(!canSubmitContent)
+
+                Button(role: .destructive) {
+                    interrupt()
+                } label: {
+                    Label(composerCopy("thread.interrupt.action"), systemImage: "stop.circle")
+                }
+                .disabled(onInterrupt == nil)
+            } label: {
+                primaryActionLabel(systemImage: "ellipsis")
+            }
+            .buttonStyle(.plain)
+            .disabled(!canOpenRunningActions)
+            .opacity(canOpenRunningActions ? 1 : 0.45)
+            .accessibilityLabel(primaryActionAccessibilityLabel)
+            .accessibilityIdentifier("thread-send-button")
+        } else {
+            Button {
+                send()
+            } label: {
+                primaryActionLabel(systemImage: "arrow.up")
+            }
+            .buttonStyle(.plain)
+            .disabled(!canSubmitContent)
+            .opacity(canSubmitContent ? 1 : 0.45)
+            .accessibilityLabel(primaryActionAccessibilityLabel)
+            .accessibilityIdentifier("thread-send-button")
+        }
+    }
+
+    private func primaryActionLabel(systemImage: String) -> some View {
+        Group {
+            if isSending {
+                ProgressView()
+                    .tint(.white)
+            } else {
+                Image(systemName: systemImage)
+                    .font(.system(size: 16, weight: .bold))
+            }
+        }
+        .foregroundStyle(.white)
+        .frame(width: 34, height: 34)
+        .background(Circle().fill(.black))
+        .contentShape(Circle())
     }
 
     private var queueActionTitle: String {

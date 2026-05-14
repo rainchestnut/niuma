@@ -43,6 +43,7 @@ pub(crate) struct TurnStartPayload<'a> {
 /// Complete Codex `turn/steer` payload for appending input to a running turn.
 pub(crate) struct TurnSteerPayload<'a> {
     pub(crate) thread_id: &'a str,
+    pub(crate) expected_turn_id: &'a str,
     pub(crate) input_items: Vec<Value>,
 }
 
@@ -597,6 +598,7 @@ fn turn_start_params(payload: TurnStartPayload<'_>) -> Value {
 fn turn_steer_params(payload: TurnSteerPayload<'_>) -> Value {
     json!({
         "threadId": payload.thread_id,
+        "expectedTurnId": payload.expected_turn_id,
         "input": payload.input_items,
     })
 }
@@ -753,10 +755,12 @@ mod tests {
     fn turn_steer_params_follow_app_server_shape() {
         let params = turn_steer_params(TurnSteerPayload {
             thread_id: "thread-1",
+            expected_turn_id: "turn-1",
             input_items: vec![json!({ "type": "text", "text": "adjust course" })],
         });
 
         assert_eq!(params["threadId"], "thread-1");
+        assert_eq!(params["expectedTurnId"], "turn-1");
         assert_eq!(params["input"][0]["text"], "adjust course");
         assert!(params.get("message_mode").is_none());
     }
