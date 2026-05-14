@@ -165,7 +165,7 @@ struct BranchChangesSheet: View {
             }
             .fullScreenCover(isPresented: $isShowingBranchChangeDetail) {
                 if let part = branchDetailPart {
-                    FileChangeDetailSheet(part: part, rawData: branchDetailData)
+                    FileChangeDetailSheet(part: part)
                 }
             }
         }
@@ -189,13 +189,6 @@ struct BranchChangesSheet: View {
             deletions: summary.deletions,
             filesSummary: result.filesSummary
         )
-    }
-
-    private var branchDetailData: Data? {
-        guard let transferID = appModel.branchChangesByThread[session.threadID]?.transferID else {
-            return nil
-        }
-        return appModel.localAttachmentData(forTransferID: transferID)
     }
 
     private func openBranchChangeDetail(_ result: BranchChangesResult) {

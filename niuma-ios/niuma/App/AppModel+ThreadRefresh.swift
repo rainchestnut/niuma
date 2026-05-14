@@ -91,13 +91,19 @@ extension AppModel {
         }
     }
 
-    /// Ensures the branch-change diff bundle referenced by a result is available for local detail rendering.
-    func ensureBranchChangeBundleDownloaded(_ result: BranchChangesResult) async {
-        guard result.succeeded,
-              let transferID = result.transferID,
-              localAttachmentData(forTransferID: transferID) == nil,
-              let identity,
-              let selectedAgent else {
+    /// Ensures an agent-originated transfer is available for views that render by transfer id.
+    func ensureAgentTransferDownloaded(transferID: String, encryptedSizeBytes: Int?) async {
+        guard localAttachmentData(forTransferID: transferID) == nil else {
+            transferDownloadStates[transferID] = .ready
+            return
+        }
+        guard transferDownloadStates[transferID] != .downloading else { return }
+        guard let identity else {
+            transferDownloadStates[transferID] = .failed(AppModelError.missingDeviceIdentity.localizedDescription)
+            return
+        }
+        guard let selectedAgent else {
+            transferDownloadStates[transferID] = .failed(AppModelError.missingAgentBinding.localizedDescription)
             return
         }
         await receiveTransferIfNeeded(
@@ -106,10 +112,18 @@ extension AppModel {
                 direction: .agentToIOS,
                 sourceDeviceID: selectedAgent.agentID,
                 targetDeviceID: identity.deviceID,
-                encryptedSizeBytes: result.sizeBytes ?? 0,
+                encryptedSizeBytes: encryptedSizeBytes ?? 0,
                 expiresAt: 0
             )
         )
+    }
+
+    /// Ensures the branch-change diff bundle referenced by a result is available for local detail rendering.
+    func ensureBranchChangeBundleDownloaded(_ result: BranchChangesResult) async {
+        guard result.succeeded, let transferID = result.transferID else {
+            return
+        }
+        await ensureAgentTransferDownloaded(transferID: transferID, encryptedSizeBytes: result.sizeBytes)
     }
 
     func refreshThreadDetails(threadID: String) async {

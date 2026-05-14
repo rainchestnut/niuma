@@ -22,6 +22,8 @@ final class AppModel {
     var threadRefreshStates: [String: ThreadRefreshStatus] = [:]
     var transientOutgoingEntries: [String: [ThreadEntry]] = [:]
     var localAttachments: [String: LocalAttachmentPayload] = [:]
+    /// Volatile transfer loading state used by views before bytes reach `localAttachments`.
+    var transferDownloadStates: [String: TransferDownloadState] = [:]
     var branchChangesByThread: [String: BranchChangesResult] = [:]
     var queuedTaskCountsByThread: [String: Int] = [:]
     var archivingThreadIDs: Set<String> = []

@@ -1189,6 +1189,23 @@
         }
       }
     },
+    "common.retry" : {
+      "extractionState" : "stale",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Retry"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "重试"
+          }
+        }
+      }
+    },
     "common.ok" : {
       "extractionState" : "stale",
       "localizations" : {
@@ -1351,6 +1368,40 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "详情正在同步，稍后重试。"
+          }
+        }
+      }
+    },
+    "details.syncing.failed" : {
+      "extractionState" : "stale",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Details failed to sync: %@"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "详情同步失败：%@"
+          }
+        }
+      }
+    },
+    "details.unavailable" : {
+      "extractionState" : "stale",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Details are unavailable."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "详情不可用。"
           }
         }
       }

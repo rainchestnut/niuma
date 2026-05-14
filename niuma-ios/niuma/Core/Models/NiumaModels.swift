@@ -596,6 +596,13 @@ nonisolated struct LocalAttachmentPayload: Hashable {
     let localRelativePath: String
 }
 
+/// In-memory lifecycle for a transfer-backed resource that a visible view is waiting on.
+nonisolated enum TransferDownloadState: Hashable {
+    case downloading
+    case ready
+    case failed(String)
+}
+
 nonisolated struct MetadataRefreshResult: Hashable {
     let requestID: String
     let succeeded: Bool

@@ -245,7 +245,7 @@ struct ContentPartView: View {
                 openDetail: { isShowingFileChangeDetail = true }
             )
             .fullScreenCover(isPresented: $isShowingFileChangeDetail) {
-                FileChangeDetailSheet(part: part, rawData: localData)
+                FileChangeDetailSheet(part: part)
             }
         }
     }
@@ -352,7 +352,6 @@ struct FileChangeDetailSheet: View {
     @Environment(\.dismiss) private var dismiss
 
     let part: ContentPart
-    let rawData: Data?
 
     private let decoder = JSONDecoder()
 
@@ -369,11 +368,7 @@ struct FileChangeDetailSheet: View {
                         ForEach(part.filesSummary ?? [], id: \.path) { file in
                             FileChangeFallbackFileRow(file: file)
                         }
-                        if rawData == nil {
-                            Text(L10n.string("details.syncing.retry", language: appModel.appLanguage))
-                                .font(.footnote)
-                                .foregroundStyle(NiumaPalette.mutedInk)
-                        }
+                        detailStatusView
                     }
                 }
                 .padding(16)
@@ -387,11 +382,77 @@ struct FileChangeDetailSheet: View {
                 }
             }
         }
+        .task(id: part.transferID) {
+            await ensureDetailDataIfNeeded()
+        }
     }
 
     private var bundle: FileChangeDiffBundle? {
         guard let rawData else { return nil }
         return try? decoder.decode(FileChangeDiffBundle.self, from: rawData)
+    }
+
+    private var rawData: Data? {
+        part.transferID.flatMap { appModel.localAttachmentData(forTransferID: $0) }
+    }
+
+    @ViewBuilder
+    private var detailStatusView: some View {
+        if rawData == nil {
+            switch transferState {
+            case .downloading:
+                HStack(spacing: 8) {
+                    ProgressView()
+                    Text(L10n.string("details.syncing", language: appModel.appLanguage))
+                }
+                .font(.footnote)
+                .foregroundStyle(NiumaPalette.mutedInk)
+            case .failed(let message):
+                VStack(alignment: .leading, spacing: 10) {
+                    Text(L10n.string("details.syncing.failed", language: appModel.appLanguage, message))
+                        .font(.footnote)
+                        .foregroundStyle(NiumaPalette.mutedInk)
+                    Button {
+                        Task { await retryDetailDownload() }
+                    } label: {
+                        Text(L10n.string("common.retry", language: appModel.appLanguage))
+                            .font(.footnote.weight(.semibold))
+                    }
+                    .buttonStyle(.bordered)
+                }
+            case .ready:
+                Text(L10n.string("details.unavailable", language: appModel.appLanguage))
+                    .font(.footnote)
+                    .foregroundStyle(NiumaPalette.mutedInk)
+            case nil:
+                Text(part.transferID == nil
+                     ? L10n.string("details.unavailable", language: appModel.appLanguage)
+                     : L10n.string("details.syncing.retry", language: appModel.appLanguage))
+                    .font(.footnote)
+                    .foregroundStyle(NiumaPalette.mutedInk)
+            }
+        }
+    }
+
+    private var transferState: TransferDownloadState? {
+        guard let transferID = part.transferID else {
+            return nil
+        }
+        return appModel.transferDownloadStates[transferID]
+    }
+
+    private func ensureDetailDataIfNeeded() async {
+        guard let transferID = part.transferID, rawData == nil else {
+            return
+        }
+        await appModel.ensureAgentTransferDownloaded(transferID: transferID, encryptedSizeBytes: part.sizeBytes)
+    }
+
+    private func retryDetailDownload() async {
+        guard let transferID = part.transferID else {
+            return
+        }
+        await appModel.ensureAgentTransferDownloaded(transferID: transferID, encryptedSizeBytes: part.sizeBytes)
     }
 }
 

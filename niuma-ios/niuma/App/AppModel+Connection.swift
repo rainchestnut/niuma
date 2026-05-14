@@ -242,12 +242,17 @@ extension AppModel {
         guard ready.direction == .agentToIOS, let identity else { return }
         if let payload = localAttachments[ready.transferID],
            dataStore.localAttachmentData(payload) != nil {
+            transferDownloadStates[ready.transferID] = .ready
             _ = try? await controller?.ackTransfer(
                 transferID: ready.transferID,
                 request: TransferAckRequestData(receiverDeviceID: identity.deviceID)
             )
             return
         }
+        if transferDownloadStates[ready.transferID] == .downloading {
+            return
+        }
+        transferDownloadStates[ready.transferID] = .downloading
 
         do {
             let controller = try requireController()
@@ -294,11 +299,13 @@ extension AppModel {
             )
             localAttachments[ready.transferID] = payload
             dataStore.upsertLocalAttachment(payload)
+            transferDownloadStates[ready.transferID] = .ready
             _ = try await controller.ackTransfer(
                 transferID: ready.transferID,
                 request: TransferAckRequestData(receiverDeviceID: identity.deviceID)
             )
         } catch {
+            transferDownloadStates[ready.transferID] = .failed(error.localizedDescription)
             pendingError = error.localizedDescription
         }
     }
@@ -324,7 +331,9 @@ extension AppModel {
         case .branchChangesResult(let result):
             logger.info("branch_changes_result request_id=\(result.requestID, privacy: .public) thread_id=\(result.threadID, privacy: .public) succeeded=\(result.succeeded, privacy: .public)")
             branchChangesByThread[result.threadID] = result
-            if !result.succeeded {
+            if result.succeeded {
+                Task { await ensureBranchChangeBundleDownloaded(result) }
+            } else {
                 pendingError = result.error ?? "branch changes failed"
             }
 

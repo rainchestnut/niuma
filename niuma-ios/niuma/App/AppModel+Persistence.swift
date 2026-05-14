@@ -49,6 +49,9 @@ extension AppModel {
 
     /// Clears in-memory timeline and refresh state for a local thread history reset.
     func clearThreadRuntimeState(threadID: String) {
+        if let transferID = branchChangesByThread[threadID]?.transferID {
+            transferDownloadStates.removeValue(forKey: transferID)
+        }
         timelines.removeValue(forKey: threadID)
         threadRefreshStates.removeValue(forKey: threadID)
         transientOutgoingEntries.removeValue(forKey: threadID)
@@ -129,6 +132,7 @@ extension AppModel {
         threadRefreshStates = [:]
         transientOutgoingEntries = [:]
         localAttachments = [:]
+        transferDownloadStates = [:]
         visibleThreadID = nil
         availableModels = []
         selectedModelID = nil
@@ -207,6 +211,7 @@ extension AppModel {
         threadRefreshStates = [:]
         transientOutgoingEntries = [:]
         localAttachments = [:]
+        transferDownloadStates = [:]
         branchChangesByThread = [:]
         availableModels = []
         selectedModelID = nil
