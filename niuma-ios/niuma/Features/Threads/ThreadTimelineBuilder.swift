@@ -88,6 +88,7 @@ enum ThreadRenderItem: Identifiable {
         var items: [ThreadRenderItem] = []
         var processEntries: [ThreadMessageRenderItem] = []
         var pendingFinalFileChanges: [ThreadMessageRenderItem] = []
+        var finalAnswerCanReceiveFileChanges = false
 
         func flushProcessEntries() {
             guard !processEntries.isEmpty else { return }
@@ -103,6 +104,9 @@ enum ThreadRenderItem: Identifiable {
             processEntries.removeAll(keepingCapacity: true)
         }
 
+        // Codex can expose completed file changes either before or after the
+        // final answer item. Keep them visually attached to that final answer
+        // instead of letting them drift below the next user prompt.
         func flushPendingFileChanges() {
             guard !pendingFinalFileChanges.isEmpty else { return }
             for entry in pendingFinalFileChanges {
@@ -115,13 +119,22 @@ enum ThreadRenderItem: Identifiable {
             let item = ThreadMessageRenderItem(entry: entry)
             switch entry.timelineKind {
             case .fileChangeSummary:
-                pendingFinalFileChanges.append(item)
+                if finalAnswerCanReceiveFileChanges {
+                    items.append(.message(item))
+                } else {
+                    pendingFinalFileChanges.append(item)
+                }
             case .process:
                 processEntries.append(item)
             case .message:
+                if !entry.endsAssistantTurn {
+                    flushPendingFileChanges()
+                    finalAnswerCanReceiveFileChanges = false
+                }
                 flushProcessEntries()
                 items.append(.message(item))
                 if entry.endsAssistantTurn {
+                    finalAnswerCanReceiveFileChanges = true
                     flushPendingFileChanges()
                 }
             }
