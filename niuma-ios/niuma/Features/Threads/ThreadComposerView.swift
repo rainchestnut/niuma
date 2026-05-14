@@ -7,6 +7,7 @@ struct ThreadComposerBar: View {
     @State private var speechTranscriber = ComposerSpeechTranscriber()
     @State private var isAttachmentPanelExpanded = false
     @State private var isIntelligencePickerExpanded = false
+    @State private var isShowingRunningActions = false
 
     let placeholder: String
     let attachments: [OutgoingAttachment]
@@ -31,12 +32,24 @@ struct ThreadComposerBar: View {
         .custom,
     ]
 
-    private var canSend: Bool {
+    private var hasComposerPayload: Bool {
+        !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !attachments.isEmpty
+    }
+
+    private var canSubmitContent: Bool {
         !isSending
             && !speechTranscriber.isRecording
             && !speechTranscriber.isPreparing
             && !speechTranscriber.isFinalizing
-            && (!prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !attachments.isEmpty)
+            && hasComposerPayload
+    }
+
+    private var canOpenRunningActions: Bool {
+        isTurnRunning && !isSending && !speechTranscriber.isFinalizing
+    }
+
+    private var isPrimaryActionEnabled: Bool {
+        isTurnRunning ? canOpenRunningActions : canSubmitContent
     }
 
     var body: some View {
@@ -64,13 +77,6 @@ struct ThreadComposerBar: View {
                     }
                     intelligencePickerButton
                     permissionMenu
-                    if queuedTaskCount > 0 {
-                        ComposerPill(title: L10n.string("thread.queue.count", language: appModel.appLanguage, queuedTaskCount))
-                    }
-                    if isTurnRunning {
-                        steerButton
-                        turnControlMenu
-                    }
                     Spacer()
                 }
 
@@ -104,13 +110,13 @@ struct ThreadComposerBar: View {
                             .foregroundStyle(NiumaPalette.ink)
                             .textFieldStyle(.plain)
                             .lineLimit(1...4)
-                            .submitLabel(.send)
+                            .submitLabel(isTurnRunning ? .done : .send)
                             .focused(isPromptFocused)
                             .textInputAutocapitalization(.never)
                             .autocorrectionDisabled()
                             .disabled(isSending)
                             .onSubmit {
-                                send()
+                                handlePrimaryAction()
                             }
                             .padding(.vertical, 3)
                             .contentShape(Rectangle())
@@ -154,14 +160,14 @@ struct ThreadComposerBar: View {
                         .accessibilityIdentifier("thread-voice-input-button")
 
                         Button {
-                            send()
+                            handlePrimaryAction()
                         } label: {
                             Group {
                                 if isSending {
                                     ProgressView()
                                         .tint(.white)
                                 } else {
-                                    Image(systemName: isTurnRunning ? "clock" : "arrow.up")
+                                    Image(systemName: isTurnRunning ? "ellipsis" : "arrow.up")
                                         .font(.system(size: 16, weight: .bold))
                                 }
                             }
@@ -171,9 +177,9 @@ struct ThreadComposerBar: View {
                             .contentShape(Circle())
                         }
                         .buttonStyle(.plain)
-                        .disabled(!canSend)
-                        .opacity(canSend ? 1 : 0.45)
-                        .accessibilityLabel(sendAccessibilityLabel)
+                        .disabled(!isPrimaryActionEnabled)
+                        .opacity(isPrimaryActionEnabled ? 1 : 0.45)
+                        .accessibilityLabel(primaryActionAccessibilityLabel)
                         .accessibilityIdentifier("thread-send-button")
                     }
                 }
@@ -207,10 +213,51 @@ struct ThreadComposerBar: View {
         .onDisappear {
             speechTranscriber.stop()
         }
+        .confirmationDialog(
+            composerCopy("thread.running.controls"),
+            isPresented: $isShowingRunningActions,
+            titleVisibility: .visible
+        ) {
+            Button(composerCopy("thread.steer.action")) {
+                steer()
+            }
+            .disabled(!canSubmitContent || onSteer == nil)
+
+            Button(queueActionTitle) {
+                send()
+            }
+            .disabled(!canSubmitContent)
+
+            Button(composerCopy("thread.interrupt.action"), role: .destructive) {
+                interrupt()
+            }
+            .disabled(onInterrupt == nil)
+
+            Button(appModel.localized("common.cancel"), role: .cancel) {}
+        }
+    }
+
+    /// Routes the trailing composer button without exposing running-session
+    /// controls in the persistent configuration row.
+    private func handlePrimaryAction() {
+        if isTurnRunning {
+            openRunningActions()
+        } else {
+            send()
+        }
+    }
+
+    private func openRunningActions() {
+        guard canOpenRunningActions else { return }
+        closeAttachmentPanel()
+        closeIntelligencePicker()
+        isPromptFocused.wrappedValue = false
+        isShowingRunningActions = true
     }
 
     private func send() {
-        guard canSend else { return }
+        guard canSubmitContent else { return }
+        isShowingRunningActions = false
         closeAttachmentPanel()
         closeIntelligencePicker()
         speechTranscriber.stop()
@@ -219,12 +266,23 @@ struct ThreadComposerBar: View {
     }
 
     private func steer() {
-        guard canSend, onSteer != nil else { return }
+        guard canSubmitContent, onSteer != nil else { return }
+        isShowingRunningActions = false
         closeAttachmentPanel()
         closeIntelligencePicker()
         speechTranscriber.stop()
         isPromptFocused.wrappedValue = false
         onSteer?()
+    }
+
+    private func interrupt() {
+        guard onInterrupt != nil else { return }
+        isShowingRunningActions = false
+        closeAttachmentPanel()
+        closeIntelligencePicker()
+        speechTranscriber.stop()
+        isPromptFocused.wrappedValue = false
+        onInterrupt?()
     }
 
     private func toggleAttachmentPanel() {
@@ -366,41 +424,15 @@ struct ThreadComposerBar: View {
         .accessibilityIdentifier("thread-permission-menu")
     }
 
-    private var steerButton: some View {
-        Button {
-            steer()
-        } label: {
-            ComposerPill(title: composerCopy("thread.steer.action"))
+    private var queueActionTitle: String {
+        guard queuedTaskCount > 0 else {
+            return composerCopy("thread.queue.action")
         }
-        .buttonStyle(.plain)
-        .disabled(!canSend)
-        .opacity(canSend ? 1 : 0.45)
-        .accessibilityLabel(composerCopy("thread.steer.accessibility"))
-        .accessibilityIdentifier("thread-steer-button")
+        return "\(composerCopy("thread.queue.action")) (\(L10n.string("thread.queue.count", language: appModel.appLanguage, queuedTaskCount)))"
     }
 
-    private var turnControlMenu: some View {
-        Menu {
-            Button(role: .destructive) {
-                onInterrupt?()
-            } label: {
-                Label(composerCopy("thread.interrupt.action"), systemImage: "stop.circle")
-            }
-        } label: {
-            Image(systemName: "ellipsis.circle")
-                .font(.system(size: 16, weight: .semibold))
-                .foregroundStyle(NiumaPalette.ink)
-                .frame(width: 30, height: 30)
-                .contentShape(Circle())
-        }
-        .buttonStyle(.plain)
-        .disabled(onInterrupt == nil)
-        .accessibilityLabel(composerCopy("thread.running.controls"))
-        .accessibilityIdentifier("thread-running-controls-menu")
-    }
-
-    private var sendAccessibilityLabel: String {
-        isTurnRunning ? composerCopy("thread.queue.action") : appModel.localized("common.send")
+    private var primaryActionAccessibilityLabel: String {
+        isTurnRunning ? composerCopy("thread.running.controls") : appModel.localized("common.send")
     }
 
     private func composerCopy(_ key: String) -> String {
