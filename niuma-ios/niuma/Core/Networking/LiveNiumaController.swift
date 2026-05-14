@@ -146,6 +146,22 @@ final class LiveNiumaController: NiumaControlling {
         webSocketTask = nil
     }
 
+    /// Performs a protocol-level health check without sending a business message.
+    func pingRealtime() async throws {
+        guard let webSocketTask else {
+            throw AppModelError.realtimeNotConnected
+        }
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            webSocketTask.sendPing { error in
+                if let error {
+                    continuation.resume(throwing: error)
+                } else {
+                    continuation.resume()
+                }
+            }
+        }
+    }
+
     func sendTaskStart(request: TaskStartRequestData) async throws {
         let businessPayload = ContentPartsPayload(
             contentParts: request.contentParts ?? [ContentPart(kind: .text, text: request.prompt)]

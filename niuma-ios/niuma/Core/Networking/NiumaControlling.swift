@@ -50,6 +50,9 @@ protocol NiumaControlling: AnyObject {
     /// Closes the active realtime WebSocket, if one is connected.
     func disconnectRealtime()
 
+    /// Sends a WebSocket ping and waits for the peer pong to prove the socket is still writable.
+    func pingRealtime() async throws
+
     /// Requests a desktop metadata refresh through the realtime channel.
     /// - Parameters:
     ///   - request: `MetadataRefreshRequestData` carrying the refresh request id.

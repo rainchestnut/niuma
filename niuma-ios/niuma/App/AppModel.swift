@@ -53,7 +53,14 @@ final class AppModel {
     @ObservationIgnored let dataStore: NiumaDataStore
     @ObservationIgnored let threadSyncPipeline: ThreadSyncPipeline
     @ObservationIgnored let realtimeSendTimeout: Duration
+    @ObservationIgnored let realtimeHealthInterval: Duration
     @ObservationIgnored var realtimeTask: Task<Void, Never>?
+    @ObservationIgnored var realtimeReconnectTask: Task<Void, Never>?
+    @ObservationIgnored var realtimeHealthTask: Task<Void, Never>?
+    @ObservationIgnored var realtimeConnectionGeneration = 0
+    @ObservationIgnored var realtimeReconnectGeneration = 0
+    /// Realtime maintenance is foreground-only; iOS may suspend sockets while the app is backgrounded.
+    @ObservationIgnored var shouldMaintainRealtimeConnection = true
     @ObservationIgnored var threadSyncResultTask: Task<Void, Never>?
     @ObservationIgnored var threadRefreshTimeoutTasks: [String: Task<Void, Never>] = [:]
     @ObservationIgnored var pendingNewTaskPrompts: [String: PendingNewTaskPrompt] = [:]
@@ -68,7 +75,8 @@ final class AppModel {
         storage: UserDefaultsStore,
         dataStore: NiumaDataStore,
         threadSyncPipeline: ThreadSyncPipeline,
-        realtimeSendTimeout: Duration = .seconds(8)
+        realtimeSendTimeout: Duration = .seconds(8),
+        realtimeHealthInterval: Duration = .seconds(25)
     ) {
         self.serverBaseURL = serverBaseURL
         self.serverBaseURLText = serverBaseURL.map(Self.displayString(forServerBaseURL:)) ?? ""
@@ -79,6 +87,7 @@ final class AppModel {
         self.dataStore = dataStore
         self.threadSyncPipeline = threadSyncPipeline
         self.realtimeSendTimeout = realtimeSendTimeout
+        self.realtimeHealthInterval = realtimeHealthInterval
         let persistedAgents = dataStore.loadAgents()
         self.pairedAgents = persistedAgents.agents
         self.selectedAgentID = persistedAgents.selectedAgentID
@@ -221,6 +230,7 @@ final class AppModel {
     /// Refreshes visible metadata from the selected desktop agent.
     func refresh() async {
         guard let identity, let selectedAgent else { return }
+        shouldMaintainRealtimeConnection = true
         isRefreshing = true
         defer { isRefreshing = false }
 
@@ -257,7 +267,7 @@ final class AppModel {
                 pendingError = error.localizedDescription
             }
             updateAgentOnline(agentID: selectedAgent.agentID, isOnline: false)
-            connectionState = .degraded
+            connectionState = isTransientRealtimeDisconnect(error) ? .retrying : .degraded
         }
     }
 

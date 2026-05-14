@@ -178,6 +178,7 @@ extension AppModel {
     /// Swaps the active transport endpoint and tears down server-scoped auth state.
     func replaceController(serverBaseURL: URL) {
         tearDownRealtimeState()
+        shouldMaintainRealtimeConnection = true
         self.serverBaseURL = serverBaseURL
         controller = controllerFactory(serverBaseURL)
         connectionState = .disconnected
@@ -186,8 +187,15 @@ extension AppModel {
 
     /// Cancels live work that could otherwise write stale data after a reset.
     private func tearDownRealtimeState() {
+        realtimeConnectionGeneration += 1
+        realtimeReconnectGeneration += 1
+        shouldMaintainRealtimeConnection = false
+        realtimeReconnectTask?.cancel()
+        realtimeReconnectTask = nil
         realtimeTask?.cancel()
         realtimeTask = nil
+        realtimeHealthTask?.cancel()
+        realtimeHealthTask = nil
         controller?.disconnectRealtime()
         controller?.updateSessionToken(nil)
         for task in threadRefreshTimeoutTasks.values {

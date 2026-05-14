@@ -164,13 +164,16 @@ extension AppModel {
                     pendingError = message
                 }
             }
-            controller?.disconnectRealtime()
-            connectionState = .degraded
+            if isTransientDisconnect {
+                connectionState = .retrying
+            } else {
+                controller?.disconnectRealtime()
+                connectionState = .degraded
+            }
         }
     }
 
-    /// Sends the detail refresh request and retries once when iOS is resuming
-    /// from a suspended WebSocket that still looked connected locally.
+    /// Sends the detail refresh request and lets the shared reconnect supervisor recover transport failures.
     func sendResumeThreadWithRealtimeRecovery(
         thread: ThreadSummary,
         identity: LocalDeviceIdentity,
