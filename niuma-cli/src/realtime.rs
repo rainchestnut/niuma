@@ -387,6 +387,7 @@ where
         "metadata_refresh" => {
             let inbound: MetadataRefreshMessage = serde_json::from_value(value)?;
             handle_metadata_refresh(writer, runtime.codex_app_server.clone(), inbound).await?;
+            start_ready_queued_tasks(writer, runtime).await?;
         }
         "task_start" => {
             let inbound: TaskStartInbound = serde_json::from_value(value)?;
@@ -426,6 +427,7 @@ where
         }
         "resume_thread" => {
             let inbound: ResumeThreadInbound = serde_json::from_value(value)?;
+            let thread_id = inbound.thread_id.clone();
             handle_resume_thread(
                 writer,
                 &runtime.identity,
@@ -435,6 +437,7 @@ where
                 inbound,
             )
             .await?;
+            start_next_queued_task(writer, runtime, &thread_id).await?;
         }
         "branch_changes_request" => {
             let inbound: BranchChangesRequest = serde_json::from_value(value)?;
@@ -543,16 +546,38 @@ where
         return Ok(());
     };
 
-    if let Some(thread_id) = inbound.thread_id.clone()
-        && should_queue_task_start(&app_server, active_threads.clone(), &thread_id).await
-    {
-        let queued_count = enqueue_task_start(pending_task_starts, &thread_id, inbound).await;
-        send_wire_message(
-            writer,
-            task_queue_sync(&device_id, &thread_id, queued_count, "queued"),
-        )
-        .await?;
-        return Ok(());
+    if let Some(thread_id) = inbound.thread_id.clone() {
+        match should_queue_task_start(&app_server, &thread_id).await {
+            Ok(true) => {
+                let queued_count =
+                    enqueue_task_start(pending_task_starts, &thread_id, inbound).await;
+                send_wire_message(
+                    writer,
+                    task_queue_sync(&device_id, &thread_id, queued_count, "queued"),
+                )
+                .await?;
+                return Ok(());
+            }
+            Ok(false) => {}
+            Err(err) => {
+                send_wire_message(
+                    writer,
+                    encrypt_task_update(
+                        identity,
+                        task_error_update(&device_id, &fallback_thread_id, &err.to_string()),
+                    )?,
+                )
+                .await?;
+                warn!(
+                    request_id = %request_id.as_deref().unwrap_or(""),
+                    device_id = %device_id,
+                    project_id = %project_id,
+                    thread_id = %thread_id,
+                    "task_start_status_check_failed: {err:#}"
+                );
+                return Ok(());
+            }
+        }
     }
 
     start_task_now(
@@ -708,24 +733,20 @@ where
 
 async fn should_queue_task_start(
     app_server: &CodexAppServerClient,
-    active_threads: Arc<RwLock<HashMap<String, ActiveThread>>>,
     thread_id: &str,
-) -> bool {
-    if active_threads
-        .read()
-        .await
-        .get(thread_id)
-        .and_then(|active| active.active_turn_id.as_ref())
-        .is_some()
-    {
-        return true;
-    }
-    app_server
+) -> Result<bool> {
+    let payload = app_server
         .read_thread_payload(thread_id, false)
         .await
-        .ok()
-        .map(|payload| normalize_thread_status(payload.get("status"), false))
-        .is_some_and(|status| status == "running" || status == "waiting_approval")
+        .with_context(|| format!("failed to read Codex thread {thread_id} status"))?;
+    Ok(task_start_thread_status_is_busy(&normalize_thread_status(
+        payload.get("status"),
+        false,
+    )))
+}
+
+fn task_start_thread_status_is_busy(status: &str) -> bool {
+    matches!(status, "running" | "waiting_approval")
 }
 
 async fn enqueue_task_start(
@@ -1239,8 +1260,8 @@ where
     {
         send_wire_message(writer, sync).await?;
     }
-    let completed_thread_id =
-        apply_turn_lifecycle_notification(runtime.active_threads.clone(), &event).await;
+    let should_try_start_queued_task = notification_may_unblock_task_queue(&event);
+    apply_turn_lifecycle_notification(runtime.active_threads.clone(), &event).await;
     match notification_metadata_syncs(
         runtime.codex_app_server.as_ref(),
         runtime.active_threads.clone(),
@@ -1314,7 +1335,7 @@ where
         &thread_id,
     )
     .await?;
-    if let Some(thread_id) = completed_thread_id {
+    if should_try_start_queued_task {
         start_next_queued_task(writer, runtime, &thread_id).await?;
     }
     Ok(())
@@ -1355,6 +1376,17 @@ where
     let Some(app_server) = runtime.codex_app_server.clone() else {
         return Ok(());
     };
+    match should_queue_task_start(&app_server, thread_id).await {
+        Ok(true) => return Ok(()),
+        Ok(false) => {}
+        Err(err) => {
+            warn!(
+                thread_id = %thread_id,
+                "queued_task_status_check_failed: {err:#}"
+            );
+            return Ok(());
+        }
+    }
     let next = {
         let mut pending = runtime.pending_task_starts.write().await;
         let Some(queue) = pending.get_mut(thread_id) else {
@@ -1399,6 +1431,21 @@ where
         },
     )
     .await
+}
+
+async fn start_ready_queued_tasks<S, E>(writer: &mut S, runtime: &AgentChannelRuntime) -> Result<()>
+where
+    S: Sink<Message, Error = E> + Unpin,
+    E: std::error::Error + Send + Sync + 'static,
+{
+    let thread_ids = {
+        let pending = runtime.pending_task_starts.read().await;
+        pending.keys().cloned().collect::<Vec<_>>()
+    };
+    for thread_id in thread_ids {
+        start_next_queued_task(writer, runtime, &thread_id).await?;
+    }
+    Ok(())
 }
 
 async fn maybe_send_task_progress_push<S, E>(
@@ -3127,6 +3174,13 @@ fn notification_method(notification: &serde_json::Value) -> Option<&str> {
     notification.get("method").and_then(Value::as_str)
 }
 
+fn notification_may_unblock_task_queue(notification: &serde_json::Value) -> bool {
+    matches!(
+        notification_method(notification),
+        Some("turn/completed" | "thread/status/changed")
+    )
+}
+
 fn is_task_progress_push_trigger(notification: &serde_json::Value) -> bool {
     matches!(notification_method(notification), Some("turn/completed"))
 }
@@ -3347,7 +3401,8 @@ mod tests {
         apply_turn_lifecycle_notification, build_mcp_elicitation_request, claim_task_progress_push,
         claim_user_input_request, expected_turn_id_for_steer, handle_approval_response,
         handle_user_input_response, is_missing_rollout_error, mark_user_input_completed,
-        metadata_refresh_completed_wire, task_progress_push_marker, thread_archive_failed_wire,
+        metadata_refresh_completed_wire, notification_may_unblock_task_queue,
+        task_progress_push_marker, task_start_thread_status_is_busy, thread_archive_failed_wire,
         thread_archive_result_wire, thread_rename_failed_wire, thread_rename_result_wire,
         thread_sync_completed, user_input_app_server_response,
     };
@@ -3638,6 +3693,31 @@ mod tests {
                 .and_then(|thread| thread.active_turn_id.as_deref()),
             None
         );
+    }
+
+    #[test]
+    fn task_start_queue_only_treats_live_busy_statuses_as_blocking() {
+        assert!(task_start_thread_status_is_busy("running"));
+        assert!(task_start_thread_status_is_busy("waiting_approval"));
+        assert!(!task_start_thread_status_is_busy("idle"));
+        assert!(!task_start_thread_status_is_busy("completed"));
+        assert!(!task_start_thread_status_is_busy("archived"));
+    }
+
+    #[test]
+    fn only_status_or_completion_notifications_try_to_unblock_task_queue() {
+        assert!(notification_may_unblock_task_queue(&json!({
+            "method": "turn/completed"
+        })));
+        assert!(notification_may_unblock_task_queue(&json!({
+            "method": "thread/status/changed"
+        })));
+        assert!(!notification_may_unblock_task_queue(&json!({
+            "method": "item/completed"
+        })));
+        assert!(!notification_may_unblock_task_queue(&json!({
+            "method": "turn/started"
+        })));
     }
 
     #[tokio::test]
