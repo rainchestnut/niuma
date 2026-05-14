@@ -92,6 +92,12 @@ extension AppModel {
         }
         runtimeState = .submitting
         do {
+            try await ensureRealtimeConnected(
+                deviceID: identity.deviceID,
+                agentID: selectedAgent.agentID,
+                sessionToken: sessionToken,
+                forceReconnect: connectionState != .connected
+            )
             try await withTimeout(realtimeSendTimeout) { [self] in
                 try await controller.sendTaskStart(
                     request: TaskStartRequestData(
@@ -116,6 +122,13 @@ extension AppModel {
             pendingNewTaskPrompts.removeValue(forKey: requestID)
             if let transientThreadID, let transientEntryID {
                 removeTransientUserPrompt(threadID: transientThreadID, entryID: transientEntryID)
+            }
+            if isTransientRealtimeDisconnect(error) {
+                await handleRealtimeDisconnected(
+                    error: error,
+                    agentID: selectedAgent.agentID,
+                    source: "task_start"
+                )
             }
             throw error
         }
@@ -149,18 +162,35 @@ extension AppModel {
             sessionToken: sessionToken
         )
         runtimeState = .streaming
-        try await withTimeout(realtimeSendTimeout) {
-            try await controller.sendTaskSteer(
-                request: TaskSteerRequestData(
-                    deviceID: identity.deviceID,
-                    agentID: selectedAgent.agentID,
-                    bindingID: selectedAgent.bindingID,
-                    agentEncryptionPublicKey: selectedAgent.agentEncryptionPublicKey,
-                    threadID: threadID,
-                    prompt: prompt,
-                    contentParts: contentParts
-                )
+        do {
+            try await ensureRealtimeConnected(
+                deviceID: identity.deviceID,
+                agentID: selectedAgent.agentID,
+                sessionToken: sessionToken,
+                forceReconnect: connectionState != .connected
             )
+            try await withTimeout(realtimeSendTimeout) {
+                try await controller.sendTaskSteer(
+                    request: TaskSteerRequestData(
+                        deviceID: identity.deviceID,
+                        agentID: selectedAgent.agentID,
+                        bindingID: selectedAgent.bindingID,
+                        agentEncryptionPublicKey: selectedAgent.agentEncryptionPublicKey,
+                        threadID: threadID,
+                        prompt: prompt,
+                        contentParts: contentParts
+                    )
+                )
+            }
+        } catch {
+            if isTransientRealtimeDisconnect(error) {
+                await handleRealtimeDisconnected(
+                    error: error,
+                    agentID: selectedAgent.agentID,
+                    source: "task_steer"
+                )
+            }
+            throw error
         }
     }
 
@@ -169,7 +199,13 @@ extension AppModel {
         do {
             guard let identity, let selectedAgent else { return }
             let controller = try requireController()
-            _ = try await authenticate(identity: identity, agent: selectedAgent)
+            let sessionToken = try await authenticate(identity: identity, agent: selectedAgent)
+            try await ensureRealtimeConnected(
+                deviceID: identity.deviceID,
+                agentID: selectedAgent.agentID,
+                sessionToken: sessionToken,
+                forceReconnect: connectionState != .connected
+            )
             try await withTimeout(realtimeSendTimeout) {
                 try await controller.interruptTask(
                     request: TaskInterruptRequestData(
@@ -180,6 +216,13 @@ extension AppModel {
                 )
             }
         } catch {
+            if let selectedAgent, isTransientRealtimeDisconnect(error) {
+                await handleRealtimeDisconnected(
+                    error: error,
+                    agentID: selectedAgent.agentID,
+                    source: "task_interrupt"
+                )
+            }
             runtimeState = .failed
             pendingError = error.localizedDescription
         }

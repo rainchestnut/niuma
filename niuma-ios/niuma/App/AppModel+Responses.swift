@@ -12,20 +12,25 @@ extension AppModel {
             throw AppModelError.approvalNotPending
         }
         do {
-            let controller = try requireController()
-            _ = try await authenticate(identity: identity, agent: selectedAgent)
             approvalResponseFailures[approval.approvalID] = nil
-            try await controller.respondToApproval(
-                request: ApprovalDecisionRequestData(
-                    deviceID: identity.deviceID,
-                    agentID: selectedAgent.agentID,
-                    bindingID: selectedAgent.bindingID,
-                    agentEncryptionPublicKey: selectedAgent.agentEncryptionPublicKey,
-                    approvalID: approval.approvalID,
-                    decision: decision,
-                    grantScope: grantScope
+            try await sendRealtimeRequestWithRecovery(
+                identity: identity,
+                agent: selectedAgent,
+                operationLabel: "approval_response",
+                forceReconnect: connectionState != .connected
+            ) { controller in
+                try await controller.respondToApproval(
+                    request: ApprovalDecisionRequestData(
+                        deviceID: identity.deviceID,
+                        agentID: selectedAgent.agentID,
+                        bindingID: selectedAgent.bindingID,
+                        agentEncryptionPublicKey: selectedAgent.agentEncryptionPublicKey,
+                        approvalID: approval.approvalID,
+                        decision: decision,
+                        grantScope: grantScope
+                    )
                 )
-            )
+            }
         } catch {
             pendingError = error.localizedDescription
             throw error
@@ -53,20 +58,25 @@ extension AppModel {
             throw AppModelError.userInputNotPending
         }
         do {
-            let controller = try requireController()
-            _ = try await authenticate(identity: identity, agent: selectedAgent)
             userInputResponseFailures[request.requestID] = nil
             updateUserInputStatus(requestID: request.requestID, status: .submitting)
-            try await controller.respondToUserInput(
-                request: UserInputResponseRequestData(
-                    deviceID: identity.deviceID,
-                    agentID: selectedAgent.agentID,
-                    bindingID: selectedAgent.bindingID,
-                    agentEncryptionPublicKey: selectedAgent.agentEncryptionPublicKey,
-                    requestID: request.requestID,
-                    answers: answers
+            try await sendRealtimeRequestWithRecovery(
+                identity: identity,
+                agent: selectedAgent,
+                operationLabel: "user_input_response",
+                forceReconnect: connectionState != .connected
+            ) { controller in
+                try await controller.respondToUserInput(
+                    request: UserInputResponseRequestData(
+                        deviceID: identity.deviceID,
+                        agentID: selectedAgent.agentID,
+                        bindingID: selectedAgent.bindingID,
+                        agentEncryptionPublicKey: selectedAgent.agentEncryptionPublicKey,
+                        requestID: request.requestID,
+                        answers: answers
+                    )
                 )
-            )
+            }
         } catch {
             updateUserInputStatus(requestID: request.requestID, status: .failed)
             userInputResponseFailures[request.requestID] = error.localizedDescription
@@ -93,25 +103,13 @@ extension AppModel {
     /// Restores the realtime channel after iOS brings the app back from a
     /// backgrounded state, where WebSocket keepalive can legitimately time out.
     func resumeAfterActivation() async {
-        guard hasBootstrapped, let identity, let selectedAgent else { return }
+        guard hasBootstrapped, identity != nil, selectedAgent != nil else { return }
         guard deviceState == .paired || deviceState == .pairFailed else { return }
-        let sessionToken: String
-        do {
-            sessionToken = try await authenticate(identity: identity, agent: selectedAgent)
-        } catch {
-            if isTransientRealtimeDisconnect(error) {
-                connectionState = .retrying
-            } else {
-                pendingError = error.localizedDescription
-            }
+        shouldMaintainRealtimeConnection = true
+        if connectionState == .connected, realtimeTask != nil {
             return
         }
         connectionState = .retrying
-        await ensureRealtimeConnected(
-            deviceID: identity.deviceID,
-            agentID: selectedAgent.agentID,
-            sessionToken: sessionToken,
-            forceReconnect: true
-        )
+        startRealtimeReconnect(reason: "activation")
     }
 }

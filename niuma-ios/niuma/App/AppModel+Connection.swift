@@ -1,6 +1,15 @@
 import Foundation
 import OSLog
 
+private let realtimeReconnectDelays: [Duration] = [
+    .seconds(0),
+    .seconds(1),
+    .seconds(2),
+    .seconds(5),
+    .seconds(10),
+    .seconds(30)
+]
+
 extension AppModel {
     func authenticate(identity: LocalDeviceIdentity, agent: PairedAgent) async throws -> String {
         let controller = try requireController()
@@ -37,52 +46,276 @@ extension AppModel {
         return controller
     }
 
-    /// Opens the authenticated WebSocket and continuously consumes server events for the selected agent.
-    func connectRealtime(deviceID: String, agentID: String, sessionToken: String) async {
-        realtimeTask?.cancel()
-        realtimeTask = nil
-        do {
-            let controller = try requireController()
-            guard let agent = pairedAgents.first(where: { $0.agentID == agentID }) else {
-                throw AppModelError.invalidPairPayload
-            }
-            let stream = try await controller.connectRealtime(
-                deviceID: deviceID,
-                agent: agent,
-                sessionToken: sessionToken
+    /// Opens the authenticated WebSocket and starts the receive and health-check tasks for it.
+    func connectRealtime(deviceID: String, agentID: String, sessionToken: String) async throws {
+        try await openRealtimeConnection(deviceID: deviceID, agentID: agentID, sessionToken: sessionToken)
+    }
+
+    /// Stops foreground realtime maintenance while iOS is allowed to suspend networking.
+    func suspendRealtimeForBackground() async {
+        shouldMaintainRealtimeConnection = false
+        realtimeConnectionGeneration += 1
+        cancelRealtimeReconnectTask()
+        cancelRealtimeReceiveAndHealthTasks()
+        controller?.disconnectRealtime()
+        await failActiveRefreshes(
+            error: localized("realtime.error.interrupted_refresh_incomplete"),
+            presentsAlert: false
+        )
+        connectionState = .disconnected
+    }
+
+    /// Starts a foreground-only reconnect loop if one is not already running.
+    func startRealtimeReconnect(reason: String, presentsFailure: Bool = true) {
+        guard shouldMaintainRealtimeConnection else { return }
+        guard realtimeReconnectTask == nil else {
+            logger.info("realtime_reconnect_already_running reason=\(reason, privacy: .public)")
+            return
+        }
+        realtimeReconnectGeneration += 1
+        let reconnectGeneration = realtimeReconnectGeneration
+        realtimeReconnectTask = Task { [weak self] in
+            await self?.runRealtimeReconnectLoop(
+                reason: reason,
+                presentsFailure: presentsFailure,
+                reconnectGeneration: reconnectGeneration
             )
-            connectionState = .connected
-            realtimeTask = Task {
-                do {
-                    for try await event in stream {
-                        await handle(event)
-                    }
-                    if !Task.isCancelled {
-                        await failActiveRefreshes(error: localized("realtime.error.closed_refresh_incomplete"))
-                        connectionState = .degraded
-                        updateAgentOnline(agentID: agentID, isOnline: false)
-                    }
-                } catch {
-                    if !Task.isCancelled {
-                        let isTransientDisconnect = isTransientRealtimeDisconnect(error)
-                        await failActiveRefreshes(
-                            error: localized("realtime.error.interrupted_refresh_incomplete"),
-                            presentsAlert: !isTransientDisconnect
-                        )
-                        connectionState = .degraded
-                        updateAgentOnline(agentID: agentID, isOnline: false)
-                        if !isTransientDisconnect {
-                            pendingError = error.localizedDescription
-                        }
-                    }
-                }
-            }
-        } catch {
-            connectionState = .degraded
-            if !isTransientRealtimeDisconnect(error) {
-                pendingError = error.localizedDescription
+        }
+    }
+
+    /// Performs bounded reconnect attempts and reports a user-visible failure only after exhaustion.
+    func runRealtimeReconnectLoop(reason: String, presentsFailure: Bool, reconnectGeneration: Int) async {
+        defer {
+            if self.realtimeReconnectGeneration == reconnectGeneration {
+                realtimeReconnectTask = nil
             }
         }
+        guard hasBootstrapped, shouldMaintainRealtimeConnection else { return }
+        guard let identity, let selectedAgent else { return }
+        var lastError: Error?
+        logger.info("realtime_reconnect_start reason=\(reason, privacy: .public) agent_id=\(selectedAgent.agentID, privacy: .public)")
+
+        for (attempt, delay) in realtimeReconnectDelays.enumerated() {
+            if Task.isCancelled || !shouldMaintainRealtimeConnection {
+                return
+            }
+            if attempt > 0 {
+                do {
+                    try await Task.sleep(for: delay)
+                } catch {
+                    return
+                }
+            }
+            if Task.isCancelled || !shouldMaintainRealtimeConnection {
+                return
+            }
+
+            do {
+                connectionState = .retrying
+                let sessionToken = try await authenticate(identity: identity, agent: selectedAgent)
+                try await openRealtimeConnection(
+                    deviceID: identity.deviceID,
+                    agentID: selectedAgent.agentID,
+                    sessionToken: sessionToken
+                )
+                try await syncAfterRealtimeReconnect(identity: identity, agent: selectedAgent)
+                connectionState = .connected
+                deviceState = .paired
+                updateAgentOnline(agentID: selectedAgent.agentID, isOnline: true)
+                logger.info("realtime_reconnect_succeeded reason=\(reason, privacy: .public) attempt=\(attempt + 1, privacy: .public)")
+                return
+            } catch {
+                if Task.isCancelled || !shouldMaintainRealtimeConnection {
+                    return
+                }
+                lastError = error
+                logger.error("realtime_reconnect_attempt_failed reason=\(reason, privacy: .public) attempt=\(attempt + 1, privacy: .public) error=\(error.localizedDescription, privacy: .public)")
+                cancelRealtimeReceiveAndHealthTasks()
+                controller?.disconnectRealtime()
+                updateAgentOnline(agentID: selectedAgent.agentID, isOnline: false)
+                if isServerForgotCurrentDevice(error, deviceID: identity.deviceID) {
+                    resetPairingAfterServerIdentityLoss()
+                    pendingError = AppModelError.serverForgotDevice.localizedDescription
+                    return
+                }
+                if !isTransientRealtimeDisconnect(error) {
+                    break
+                }
+            }
+        }
+
+        connectionState = .degraded
+        updateAgentOnline(agentID: selectedAgent.agentID, isOnline: false)
+        if presentsFailure {
+            pendingError = lastError?.localizedDescription ?? AppModelError.realtimeNotConnected.localizedDescription
+        }
+        logger.error("realtime_reconnect_failed reason=\(reason, privacy: .public)")
+    }
+
+    /// Opens a fresh realtime socket and invalidates receive tasks tied to older sockets.
+    func openRealtimeConnection(deviceID: String, agentID: String, sessionToken: String) async throws {
+        let controller = try requireController()
+        guard let agent = pairedAgents.first(where: { $0.agentID == agentID }) else {
+            throw AppModelError.invalidPairPayload
+        }
+
+        realtimeConnectionGeneration += 1
+        let generation = realtimeConnectionGeneration
+        cancelRealtimeReceiveAndHealthTasks()
+        let stream = try await controller.connectRealtime(
+            deviceID: deviceID,
+            agent: agent,
+            sessionToken: sessionToken
+        )
+        connectionState = .connected
+        updateAgentOnline(agentID: agentID, isOnline: true)
+        startRealtimeReceiver(stream: stream, agentID: agentID, generation: generation)
+        startRealtimeHealthLoop(agentID: agentID, generation: generation)
+    }
+
+    /// Consumes realtime events until the socket closes, then hands recovery to the reconnect supervisor.
+    func startRealtimeReceiver(
+        stream: AsyncThrowingStream<RealtimeEvent, Error>,
+        agentID: String,
+        generation: Int
+    ) {
+        realtimeTask = Task { [weak self] in
+            do {
+                for try await event in stream {
+                    await self?.handle(event)
+                }
+                if !Task.isCancelled {
+                    await self?.handleRealtimeStreamEnded(
+                        error: AppModelError.realtimeNotConnected,
+                        agentID: agentID,
+                        generation: generation,
+                        source: "receive_closed"
+                    )
+                }
+            } catch {
+                if !Task.isCancelled {
+                    await self?.handleRealtimeStreamEnded(
+                        error: error,
+                        agentID: agentID,
+                        generation: generation,
+                        source: "receive_error"
+                    )
+                }
+            }
+        }
+    }
+
+    /// Uses protocol pings so a half-open URLSession socket is detected before the next user send.
+    func startRealtimeHealthLoop(agentID: String, generation: Int) {
+        realtimeHealthTask?.cancel()
+        let interval = realtimeHealthInterval
+        realtimeHealthTask = Task { [weak self] in
+            while !Task.isCancelled {
+                do {
+                    try await Task.sleep(for: interval)
+                } catch {
+                    return
+                }
+                await self?.checkRealtimeHealth(agentID: agentID, generation: generation)
+            }
+        }
+    }
+
+    func checkRealtimeHealth(agentID: String, generation: Int) async {
+        guard shouldMaintainRealtimeConnection else { return }
+        guard generation == realtimeConnectionGeneration, connectionState == .connected else { return }
+        do {
+            let controller = try requireController()
+            try await withTimeout(realtimeSendTimeout) {
+                try await controller.pingRealtime()
+            }
+        } catch {
+            await handleRealtimeStreamEnded(
+                error: error,
+                agentID: agentID,
+                generation: generation,
+                source: "health_ping"
+            )
+        }
+    }
+
+    /// Replays only idempotent sync requests after a recovered socket becomes available.
+    func syncAfterRealtimeReconnect(identity: LocalDeviceIdentity, agent: PairedAgent) async throws {
+        let controller = try requireController()
+        let metadataRequestID = UUID().uuidString.lowercased()
+        try await withTimeout(realtimeSendTimeout) {
+            try await controller.requestMetadataRefresh(
+                request: MetadataRefreshRequestData(
+                    requestID: metadataRequestID,
+                    deviceID: identity.deviceID
+                )
+            )
+        }
+
+        guard let visibleThreadID,
+              let thread = threadSummary(for: visibleThreadID),
+              thread.agentID == agent.agentID
+        else {
+            return
+        }
+        let syncState = await threadSyncPipeline.loadThreadSyncState(threadID: thread.threadID)
+        try await withTimeout(realtimeSendTimeout) {
+            try await controller.resumeThread(
+                request: ResumeThreadRequestData(
+                    threadID: thread.threadID,
+                    cursor: syncState.cursor,
+                    checkpoint: syncState.checkpoint
+                )
+            )
+        }
+    }
+
+    func handleRealtimeStreamEnded(
+        error: Error?,
+        agentID: String,
+        generation: Int,
+        source: String
+    ) async {
+        guard generation == realtimeConnectionGeneration else { return }
+        await handleRealtimeDisconnected(error: error, agentID: agentID, source: source)
+    }
+
+    /// Centralizes all websocket failure paths so receive errors, ping failures, and send timeouts recover identically.
+    func handleRealtimeDisconnected(error: Error?, agentID: String, source: String) async {
+        realtimeConnectionGeneration += 1
+        cancelRealtimeReceiveAndHealthTasks()
+        controller?.disconnectRealtime()
+        updateAgentOnline(agentID: agentID, isOnline: false)
+        await failActiveRefreshes(
+            error: localized("realtime.error.interrupted_refresh_incomplete"),
+            presentsAlert: false
+        )
+
+        guard shouldMaintainRealtimeConnection else {
+            connectionState = .disconnected
+            return
+        }
+
+        connectionState = .retrying
+        if let error {
+            logger.error("realtime_disconnected source=\(source, privacy: .public) error=\(error.localizedDescription, privacy: .public)")
+        } else {
+            logger.error("realtime_disconnected source=\(source, privacy: .public)")
+        }
+        startRealtimeReconnect(reason: source)
+    }
+
+    func cancelRealtimeReceiveAndHealthTasks() {
+        realtimeTask?.cancel()
+        realtimeTask = nil
+        realtimeHealthTask?.cancel()
+        realtimeHealthTask = nil
+    }
+
+    func cancelRealtimeReconnectTask() {
+        realtimeReconnectGeneration += 1
+        realtimeReconnectTask?.cancel()
+        realtimeReconnectTask = nil
     }
 
     /// Bounds websocket sends that can otherwise hang after the server has reset
@@ -109,9 +342,17 @@ extension AppModel {
         }
     }
 
-    func markRealtimeOperationTimedOut() {
-        controller?.disconnectRealtime()
-        connectionState = .degraded
+    func markRealtimeOperationTimedOut() async {
+        guard let agentID = selectedAgent?.agentID else {
+            controller?.disconnectRealtime()
+            connectionState = .degraded
+            return
+        }
+        await handleRealtimeDisconnected(
+            error: AppModelError.realtimeOperationStalled,
+            agentID: agentID,
+            source: "operation_timeout"
+        )
     }
 
     func ensureRealtimeConnected(
@@ -119,15 +360,19 @@ extension AppModel {
         agentID: String,
         sessionToken: String,
         forceReconnect: Bool = false
-    ) async {
+    ) async throws {
+        guard shouldMaintainRealtimeConnection else {
+            throw AppModelError.realtimeNotConnected
+        }
         if !forceReconnect, connectionState == .connected, realtimeTask != nil {
             return
         }
-        await connectRealtime(deviceID: deviceID, agentID: agentID, sessionToken: sessionToken)
+        cancelRealtimeReconnectTask()
+        try await connectRealtime(deviceID: deviceID, agentID: agentID, sessionToken: sessionToken)
     }
 
-    /// Authenticates, ensures a realtime WebSocket, sends one request, and
-    /// retries once when iOS is resuming from a suspended socket.
+    /// Authenticates, ensures a realtime WebSocket, sends one request, and starts
+    /// connection recovery on transient transport failures without replaying the request.
     func sendRealtimeRequestWithRecovery(
         identity: LocalDeviceIdentity,
         agent: PairedAgent,
@@ -149,17 +394,13 @@ extension AppModel {
             guard isTransientRealtimeDisconnect(error) else {
                 throw error
             }
-            logger.info("realtime_request_transient_disconnect_retry operation=\(operationLabel, privacy: .public)")
-            controller?.disconnectRealtime()
-            connectionState = .retrying
-            try await sendRealtimeRequest(
-                identity: identity,
-                agent: agent,
-                operationLabel: operationLabel,
-                forceReconnect: true,
-                afterAuthentication: afterAuthentication,
-                request: request
+            logger.info("realtime_request_transient_disconnect operation=\(operationLabel, privacy: .public)")
+            await handleRealtimeDisconnected(
+                error: error,
+                agentID: agent.agentID,
+                source: operationLabel
             )
+            throw error
         }
     }
 
@@ -177,7 +418,7 @@ extension AppModel {
         let sessionToken = try await authenticate(identity: identity, agent: agent)
         controller.updateSessionToken(sessionToken)
         try await afterAuthentication?(controller, sessionToken)
-        await ensureRealtimeConnected(
+        try await ensureRealtimeConnected(
             deviceID: identity.deviceID,
             agentID: agent.agentID,
             sessionToken: sessionToken,

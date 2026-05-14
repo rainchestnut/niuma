@@ -25,9 +25,17 @@ struct AppView: View {
             appModel.pendingPushThreadRoute = nil
         }
         .onChange(of: scenePhase) { _, phase in
-            guard phase == .active else { return }
             Task {
-                await appModel.resumeAfterActivation()
+                switch phase {
+                case .active:
+                    await appModel.resumeAfterActivation()
+                case .background:
+                    await appModel.suspendRealtimeForBackground()
+                case .inactive:
+                    break
+                @unknown default:
+                    break
+                }
             }
         }
         .alert(appModel.localized("app.error.title"), isPresented: Binding(
