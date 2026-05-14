@@ -1568,6 +1568,30 @@ async fn notification_metadata_syncs(
         return Ok(Vec::new());
     };
     match method {
+        "turn/started" => {
+            let Some(thread_id) = notification_thread_id(notification) else {
+                return Ok(Vec::new());
+            };
+            metadata_syncs_for_thread_id(
+                app_server,
+                active_threads,
+                &thread_id,
+                Some("running".to_string()),
+            )
+            .await
+        }
+        "turn/completed" => {
+            let Some(thread_id) = notification_thread_id(notification) else {
+                return Ok(Vec::new());
+            };
+            metadata_syncs_for_thread_id(
+                app_server,
+                active_threads,
+                &thread_id,
+                Some("idle".to_string()),
+            )
+            .await
+        }
         "thread/started" => {
             let Some(thread_payload) = notification_thread_payload(notification) else {
                 return Ok(Vec::new());
@@ -1721,6 +1745,14 @@ where
     let params = request.get("params").cloned().unwrap_or_else(|| json!({}));
     if method == "item/tool/requestUserInput" {
         if let Some((message, pending)) = build_user_input_request(&request_id, &params).await {
+            send_thread_status_sync(
+                writer,
+                &app_server,
+                &context,
+                &message.thread_id,
+                app_server_request_thread_status(&method).unwrap_or("pending"),
+            )
+            .await?;
             forward_user_input_request_once(writer, &app_server, &context, message, pending)
                 .await?;
         } else {
@@ -1733,6 +1765,14 @@ where
     if method == "mcpServer/elicitation/request" {
         if let Some((message, pending)) = build_mcp_elicitation_request(&request_id, &params).await
         {
+            send_thread_status_sync(
+                writer,
+                &app_server,
+                &context,
+                &message.thread_id,
+                app_server_request_thread_status(&method).unwrap_or("pending"),
+            )
+            .await?;
             forward_user_input_request_once(writer, &app_server, &context, message, pending)
                 .await?;
         } else {
@@ -1751,6 +1791,14 @@ where
                 .write()
                 .await
                 .insert(pending.approval_id.clone(), pending);
+            send_thread_status_sync(
+                writer,
+                &app_server,
+                &context,
+                &message.thread_id,
+                app_server_request_thread_status(&method).unwrap_or("waiting_approval"),
+            )
+            .await?;
             if let Some(device_id) =
                 active_device_for_thread(&context.active_threads, &message.thread_id).await
             {
@@ -1776,6 +1824,30 @@ where
             }),
         )
         .await?;
+    Ok(())
+}
+
+async fn send_thread_status_sync<S, E>(
+    writer: &mut S,
+    app_server: &CodexAppServerClient,
+    context: &AppServerRequestContext<'_>,
+    thread_id: &str,
+    status: &str,
+) -> Result<()>
+where
+    S: Sink<Message, Error = E> + Unpin,
+    E: std::error::Error + Send + Sync + 'static,
+{
+    for sync in metadata_syncs_for_thread_id(
+        Some(app_server),
+        context.active_threads.clone(),
+        thread_id,
+        Some(status.to_string()),
+    )
+    .await?
+    {
+        send_wire_message(writer, sync).await?;
+    }
     Ok(())
 }
 
@@ -2747,6 +2819,16 @@ fn approval_type_for_method(method: &str) -> Option<&'static str> {
     }
 }
 
+fn app_server_request_thread_status(method: &str) -> Option<&'static str> {
+    match method {
+        "item/tool/requestUserInput" | "mcpServer/elicitation/request" => Some("pending"),
+        "item/commandExecution/requestApproval"
+        | "item/fileChange/requestApproval"
+        | "item/permissions/requestApproval" => Some("waiting_approval"),
+        _ => None,
+    }
+}
+
 fn approval_decision(inbound: &ApprovalResponseInbound) -> &'static str {
     if inbound.decision != "allow" {
         "decline"
@@ -3449,10 +3531,11 @@ mod tests {
         McpElicitationResponseFormat, McpElicitationValueKind, MetadataRefreshMessage,
         PendingApproval, PendingUserInput, ThreadArchiveRequest, ThreadRenameRequest,
         UserInputClaim, UserInputResponseFormat, UserInputResponseInbound, agent_ws_url,
-        apply_turn_lifecycle_notification, build_mcp_elicitation_request, claim_task_progress_push,
-        claim_user_input_request, current_active_turn_id, handle_approval_response,
-        handle_user_input_response, is_missing_rollout_error, mark_user_input_completed,
-        metadata_refresh_completed_wire, notification_may_unblock_task_queue,
+        app_server_request_thread_status, apply_turn_lifecycle_notification,
+        build_mcp_elicitation_request, claim_task_progress_push, claim_user_input_request,
+        current_active_turn_id, handle_approval_response, handle_user_input_response,
+        is_missing_rollout_error, mark_user_input_completed, metadata_refresh_completed_wire,
+        notification_may_unblock_task_queue, notification_metadata_syncs,
         task_progress_push_marker, task_start_thread_status_is_busy, thread_archive_failed_wire,
         thread_archive_result_wire, thread_rename_failed_wire, thread_rename_result_wire,
         thread_sync_completed, track_started_task, user_input_app_server_response,
@@ -3802,6 +3885,90 @@ mod tests {
         assert!(!notification_may_unblock_task_queue(&json!({
             "method": "turn/started"
         })));
+    }
+
+    #[tokio::test]
+    async fn turn_lifecycle_notifications_emit_thread_status_syncs() {
+        let active_threads = Arc::new(RwLock::new(HashMap::new()));
+
+        let started = notification_metadata_syncs(
+            None,
+            active_threads.clone(),
+            &json!({
+                "method": "turn/started",
+                "params": {
+                    "threadId": "thread-1",
+                    "turnId": "turn-1"
+                }
+            }),
+        )
+        .await
+        .expect("turn started projects to thread metadata");
+        assert_eq!(started.len(), 1);
+        assert_eq!(started[0]["kind"], "thread_sync");
+        assert_eq!(started[0]["thread_id"], "thread-1");
+        assert_eq!(started[0]["status"], "running");
+
+        let completed = notification_metadata_syncs(
+            None,
+            active_threads,
+            &json!({
+                "method": "turn/completed",
+                "params": {
+                    "threadId": "thread-1",
+                    "turnId": "turn-1"
+                }
+            }),
+        )
+        .await
+        .expect("turn completed projects to thread metadata");
+        assert_eq!(completed.len(), 1);
+        assert_eq!(completed[0]["kind"], "thread_sync");
+        assert_eq!(completed[0]["thread_id"], "thread-1");
+        assert_eq!(completed[0]["status"], "idle");
+    }
+
+    #[tokio::test]
+    async fn content_item_notifications_do_not_emit_thread_status_syncs() {
+        let syncs = notification_metadata_syncs(
+            None,
+            Arc::new(RwLock::new(HashMap::new())),
+            &json!({
+                "method": "item/completed",
+                "params": {
+                    "threadId": "thread-1",
+                    "itemId": "item-1"
+                }
+            }),
+        )
+        .await
+        .expect("content item notifications are ignored by status projection");
+        assert!(syncs.is_empty());
+    }
+
+    #[test]
+    fn blocking_app_server_requests_map_to_thread_statuses() {
+        assert_eq!(
+            app_server_request_thread_status("item/tool/requestUserInput"),
+            Some("pending")
+        );
+        assert_eq!(
+            app_server_request_thread_status("mcpServer/elicitation/request"),
+            Some("pending")
+        );
+        assert_eq!(
+            app_server_request_thread_status("item/commandExecution/requestApproval"),
+            Some("waiting_approval")
+        );
+        assert_eq!(
+            app_server_request_thread_status("item/fileChange/requestApproval"),
+            Some("waiting_approval")
+        );
+        assert_eq!(
+            app_server_request_thread_status("item/permissions/requestApproval"),
+            Some("waiting_approval")
+        );
+        assert_eq!(app_server_request_thread_status("item/completed"), None);
     }
 
     #[tokio::test]
