@@ -610,7 +610,6 @@ where
     E: std::error::Error + Send + Sync + 'static,
 {
     let device_id = inbound.device_id.clone();
-    let requested_thread_id = inbound.thread_id.clone();
     match TaskRuntime::new(
         context.identity.clone(),
         context.app_server,
@@ -620,18 +619,14 @@ where
     .await
     {
         Ok(started) => {
-            if requested_thread_id.is_some() {
-                mark_thread_running(context.active_threads.clone(), &started.thread_id, None).await;
-            } else {
-                track_started_task(
-                    context.active_threads.clone(),
-                    &started.thread_id,
-                    &started.device_id,
-                    started.project_id.clone(),
-                    Some(started.turn_id.clone()),
-                )
-                .await;
-            }
+            track_started_task(
+                context.active_threads.clone(),
+                &started.thread_id,
+                &started.device_id,
+                started.project_id.clone(),
+                Some(started.turn_id.clone()),
+            )
+            .await;
             send_wire_messages(
                 writer,
                 context.identity,
@@ -689,7 +684,7 @@ where
     let device_id = inbound.device_id.clone();
     let thread_id = inbound.thread_id.clone();
     let result = if let Some(app_server) = codex_app_server {
-        match expected_turn_id_for_steer(active_threads, &thread_id).await {
+        match current_active_turn_id(active_threads, &thread_id).await {
             Ok(expected_turn_id) => {
                 TaskRuntime::new(identity.clone(), app_server, transfer_context)
                     .steer_task(inbound, &expected_turn_id)
@@ -728,13 +723,21 @@ where
         Some("task_interrupt agent_id does not match this gateway".to_string())
     } else {
         match app_server {
-            Some(app_server) => match app_server.interrupt_turn(&inbound.thread_id).await {
-                Ok(()) => {
-                    mark_thread_idle(active_threads, &inbound.thread_id).await;
-                    None
+            Some(app_server) => {
+                match current_active_turn_id(active_threads.clone(), &inbound.thread_id).await {
+                    Ok(turn_id) => match app_server
+                        .interrupt_turn(&inbound.thread_id, &turn_id)
+                        .await
+                    {
+                        Ok(()) => {
+                            mark_thread_idle(active_threads, &inbound.thread_id).await;
+                            None
+                        }
+                        Err(error) => Some(error.to_string()),
+                    },
+                    Err(error) => Some(error.to_string()),
                 }
-                Err(error) => Some(error.to_string()),
-            },
+            }
             None => Some("Codex app-server is not connected".to_string()),
         }
     };
@@ -819,8 +822,8 @@ async fn track_started_task(
         });
 }
 
-/// Returns the live app-server turn id required by `turn/steer`.
-async fn expected_turn_id_for_steer(
+/// Returns the live app-server turn id required by turn-scoped operations.
+async fn current_active_turn_id(
     active_threads: Arc<RwLock<HashMap<String, ActiveThread>>>,
     thread_id: &str,
 ) -> Result<String> {
@@ -3447,12 +3450,12 @@ mod tests {
         PendingApproval, PendingUserInput, ThreadArchiveRequest, ThreadRenameRequest,
         UserInputClaim, UserInputResponseFormat, UserInputResponseInbound, agent_ws_url,
         apply_turn_lifecycle_notification, build_mcp_elicitation_request, claim_task_progress_push,
-        claim_user_input_request, expected_turn_id_for_steer, handle_approval_response,
+        claim_user_input_request, current_active_turn_id, handle_approval_response,
         handle_user_input_response, is_missing_rollout_error, mark_user_input_completed,
         metadata_refresh_completed_wire, notification_may_unblock_task_queue,
         task_progress_push_marker, task_start_thread_status_is_busy, thread_archive_failed_wire,
         thread_archive_result_wire, thread_rename_failed_wire, thread_rename_result_wire,
-        thread_sync_completed, user_input_app_server_response,
+        thread_sync_completed, track_started_task, user_input_app_server_response,
     };
 
     #[test]
@@ -3743,6 +3746,39 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn task_start_response_records_real_turn_id_for_existing_thread() {
+        let active_threads = Arc::new(RwLock::new(HashMap::from([(
+            "thread-1".to_string(),
+            ActiveThread {
+                device_id: "ios-device".to_string(),
+                cursor: 7,
+                checkpoint: Some("turn:old".to_string()),
+                project_id: Some("project-old".to_string()),
+                active_turn_id: None,
+                last_pushed_completion: None,
+            },
+        )])));
+
+        track_started_task(
+            active_threads.clone(),
+            "thread-1",
+            "ios-device",
+            Some("project-new".to_string()),
+            Some("turn-2".to_string()),
+        )
+        .await;
+
+        let active = active_threads.read().await;
+        let thread = active
+            .get("thread-1")
+            .expect("existing thread remains tracked");
+        assert_eq!(thread.cursor, 7);
+        assert_eq!(thread.checkpoint.as_deref(), Some("turn:old"));
+        assert_eq!(thread.project_id.as_deref(), Some("project-new"));
+        assert_eq!(thread.active_turn_id.as_deref(), Some("turn-2"));
+    }
+
     #[test]
     fn task_start_queue_only_treats_live_busy_statuses_as_blocking() {
         assert!(task_start_thread_status_is_busy("running"));
@@ -3769,7 +3805,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn expected_turn_id_for_steer_requires_real_turn_id() {
+    async fn current_active_turn_id_requires_real_turn_id() {
         let active_threads = Arc::new(RwLock::new(HashMap::from([(
             "thread-1".to_string(),
             ActiveThread {
@@ -3782,9 +3818,9 @@ mod tests {
             },
         )])));
 
-        let error = expected_turn_id_for_steer(active_threads, "thread-1")
+        let error = current_active_turn_id(active_threads, "thread-1")
             .await
-            .expect_err("sentinel turn id is not safe for turn/steer");
+            .expect_err("sentinel turn id is not safe for turn-scoped operations");
         assert!(
             error
                 .to_string()
@@ -3793,7 +3829,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn expected_turn_id_for_steer_returns_active_turn_id() {
+    async fn current_active_turn_id_returns_active_turn_id() {
         let active_threads = Arc::new(RwLock::new(HashMap::from([(
             "thread-1".to_string(),
             ActiveThread {
@@ -3806,9 +3842,9 @@ mod tests {
             },
         )])));
 
-        let turn_id = expected_turn_id_for_steer(active_threads, "thread-1")
+        let turn_id = current_active_turn_id(active_threads, "thread-1")
             .await
-            .expect("real app-server turn id can steer");
+            .expect("real app-server turn id can drive turn-scoped operations");
         assert_eq!(turn_id, "turn-1");
     }
 

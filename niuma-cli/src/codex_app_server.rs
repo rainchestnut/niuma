@@ -47,6 +47,12 @@ pub(crate) struct TurnSteerPayload<'a> {
     pub(crate) input_items: Vec<Value>,
 }
 
+/// Complete Codex `turn/interrupt` payload for stopping a running turn.
+pub(crate) struct TurnInterruptPayload<'a> {
+    pub(crate) thread_id: &'a str,
+    pub(crate) turn_id: &'a str,
+}
+
 #[derive(Clone)]
 pub struct CodexAppServerClient {
     inner: Arc<CodexAppServerInner>,
@@ -350,9 +356,9 @@ impl CodexAppServerClient {
     }
 
     /// Interrupt the currently running turn for one Codex thread.
-    pub async fn interrupt_turn(&self, thread_id: &str) -> Result<()> {
-        self.request("turn/interrupt", json!({ "threadId": thread_id }))
-            .await?;
+    pub async fn interrupt_turn(&self, thread_id: &str, turn_id: &str) -> Result<()> {
+        let params = turn_interrupt_params(TurnInterruptPayload { thread_id, turn_id });
+        self.request("turn/interrupt", params).await?;
         Ok(())
     }
 
@@ -603,6 +609,13 @@ fn turn_steer_params(payload: TurnSteerPayload<'_>) -> Value {
     })
 }
 
+fn turn_interrupt_params(payload: TurnInterruptPayload<'_>) -> Value {
+    json!({
+        "threadId": payload.thread_id,
+        "turnId": payload.turn_id,
+    })
+}
+
 fn thread_start_params(
     cwd: Option<&str>,
     approval_policy: Option<&str>,
@@ -763,6 +776,17 @@ mod tests {
         assert_eq!(params["expectedTurnId"], "turn-1");
         assert_eq!(params["input"][0]["text"], "adjust course");
         assert!(params.get("message_mode").is_none());
+    }
+
+    #[test]
+    fn turn_interrupt_params_follow_app_server_shape() {
+        let params = turn_interrupt_params(TurnInterruptPayload {
+            thread_id: "thread-1",
+            turn_id: "turn-1",
+        });
+
+        assert_eq!(params["threadId"], "thread-1");
+        assert_eq!(params["turnId"], "turn-1");
     }
 
     #[test]
